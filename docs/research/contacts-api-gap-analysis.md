@@ -1,7 +1,7 @@
 # Contacts API Gap Analysis (Phase 0)
 
 > **Status:** authoritative as of 2026-04-29 on macOS 26.3.1.
-> Probes were run against a real Contacts database (1696 people, 8 groups, single iCloud container).
+> Probes were run against a real Contacts database (1696 people, 8 groups). Initial probes used a single iCloud container; multi-container behavior was verified after enabling a Google/CardDAV account (Gmail container, 0 contacts at probe time but fully addressable).
 > Probe scripts: `/tmp/contacts-probe/` (not committed — they're throwaway).
 
 ## Goal
@@ -67,7 +67,7 @@ Legend: ✅ supported · ⚠ supported with caveat · ❌ not supported · — n
 | Modification / creation date | ⚠ runtime selector only (undocumented) | ✅ `modification date` / `creation date` | ✅ | — |
 | Group CRUD | ✅ | ✅ | ✅ | — |
 | Group membership | ✅ `addMember:toGroup:` | ✅ `add person to group` | ✅ | — |
-| Containers | ✅ `CNContainer` | ❌ | ❌ | — |
+| Containers (multi-account) | ✅ `CNContainer`, `defaultContainerIdentifier`, `predicateForContactsInContainerWithIdentifier:` | ❌ no `account` class — unified view only | ❌ same as AS | — |
 | vCard 3.0 export | — | — | — | ✅ but **strips NOTE** |
 | vCard 3.0 import (parse) | — | — | — | ✅ |
 | vCard 4.0 export | — | — | — | ❌ outputs 3.0 even on input 4.0 |
@@ -297,7 +297,14 @@ This maps directly onto the BOOTSTRAP-defined milestones:
 5. **Photo format** — Contacts.framework returns raw bytes; magic-byte detection (JPEG/PNG/HEIC) needed in the response. Test with iCloud-synced contacts for HEIC variants. Deferred to v0.3.0.
 6. **Authorization revocation mid-process** — if the user revokes during operation, the next call returns empty results / error silently in some cases. Build a re-check at the entry of every tool, not just at start-up. Captured as a v0.4.0 hardening task.
 7. **Test mode safety pattern** — `CONTACTS_TEST_MODE=true` + `CONTACTS_TEST_GROUP=<name>`. Destructive ops verify the target group via the API before proceeding. Same pattern as `apple-mail-mcp`'s `check_test_mode_safety`. Captured for v0.1.0 implementation.
-8. **Containers and `On My Mac`** — single-container test database (iCloud only). Need a multi-container test rig (a non-iCloud Mac account) before shipping P3 container features.
+8. **Containers — multi-account behavior** — verified empirically on a 2-container rig (iCloud + Google/CardDAV; the Google container was synced but empty at probe time, which is fine for shape testing). Findings:
+   - `containers()` returns both, each with a stable UUID-shaped `identifier` and a user-visible `name` ("iCloud", "Gmail").
+   - **All accounts surface as `CNContainerTypeCardDAV` (3)** in this rig — even iCloud is CardDAV under the hood. `CNContainerTypeLocal` (1) only applies to the legacy "On My Mac" account, which is hidden by default in current macOS.
+   - `defaultContainerIdentifier` returns the iCloud UUID. New contacts created via `addContact:toContainerWithIdentifier:None` land there. To create in Gmail, pass the Gmail container's identifier explicitly.
+   - **`enumerateContacts*` is auto-unified across containers** — no extra work needed for cross-account reads. Use `predicateForContactsInContainerWithIdentifier:` to scope.
+   - Groups are owned by exactly one container (probed via `predicateForContainerOfGroupWithIdentifier:`). All 8 groups in the test rig live in iCloud; the Gmail container has none. **CardDAV groups are provider-dependent** — Google CardDAV may or may not expose groups. Worth re-probing with a populated Google Contacts.
+   - **AppleScript is container-blind**: no `account` class, `name of every account` errors with `-2741`. AppleScript fallback paths (notes, mod-dates) operate on the unified view; they identify contacts by UUID, so cross-container ambiguity isn't a problem in practice.
+   - Open empirical follow-ups: (a) write a contact into the Gmail container and verify round-trip; (b) test with a populated Google Contacts to see whether CardDAV groups surface; (c) re-probe with Exchange/On-My-Mac if either becomes available, since `CNContainerTypeExchange` (2) and `CNContainerTypeLocal` (1) are still untested.
 
 ## 7. Decision
 
