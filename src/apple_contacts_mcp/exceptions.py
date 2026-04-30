@@ -11,3 +11,15 @@ class ContactsAuthorizationError(ContactsError):
     """TCC authorization not granted for the Contacts data class."""
 
     pass
+
+
+class ContactsAppleScriptError(ContactsError):
+    """`osascript` exited non-zero or emitted a parse/runtime error."""
+
+    pass
+
+
+class ContactsTimeoutError(ContactsError):
+    """A subprocess or CN async operation exceeded its timeout."""
+
+    pass
