@@ -8,6 +8,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from .contacts_connector import ContactsConnector
+from .exceptions import ContactsTimeoutError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 mcp: FastMCP = FastMCP("apple-contacts")
 connector = ContactsConnector()
+
+
+_LIST_CONTACTS_MAX = 200
 
 
 _AUTH_REMEDIATION: dict[str, str] = {
@@ -72,6 +76,113 @@ def check_authorization() -> dict[str, Any]:
     if status not in ("authorized", "limited"):
         response["remediation"] = _AUTH_REMEDIATION[status]
     return response
+
+
+def _require_contacts_authorization() -> dict[str, Any] | None:
+    """Returns None if access is granted; otherwise an error dict to return.
+
+    Reused by every data tool. Triggers the system permission prompt the
+    first time it sees ``notDetermined``.
+    """
+    try:
+        status = connector._run_cn_authorization_status()
+        if status == "notDetermined":
+            try:
+                connector._run_cn_request_access()
+            except ContactsTimeoutError:
+                return {
+                    "success": False,
+                    "error": (
+                        "Contacts permission prompt is awaiting your "
+                        "response. Grant access in the system dialog "
+                        "and retry."
+                    ),
+                    "error_type": "authorization_denied",
+                    "status": "notDetermined",
+                }
+            status = connector._run_cn_authorization_status()
+        if status in ("authorized", "limited"):
+            return None
+        return {
+            "success": False,
+            "status": status,
+            "error": f"Contacts access not granted (status={status}).",
+            "error_type": "authorization_denied",
+            "remediation": _AUTH_REMEDIATION.get(
+                status,
+                "Open System Settings → Privacy & Security → Contacts.",
+            ),
+        }
+    except Exception as exc:
+        logger.error("authorization check failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"Failed to check TCC status: {exc}",
+            "error_type": "unknown",
+        }
+
+
+@mcp.tool()
+def list_contacts(offset: int = 0, limit: int = 50) -> dict[str, Any]:
+    """List contacts (paged), each with id, given_name, family_name, organization.
+
+    Use ``get_contact(id)`` to fetch full details for a specific contact.
+    Use ``search_contacts(query)`` to filter by name. Order is not
+    guaranteed.
+
+    Args:
+        offset: Number of contacts to skip. Default 0. Must be >= 0.
+        limit:  Max contacts to return. Default 50. Capped at 200.
+
+    Returns:
+        On success: ``{"success": True, "contacts": [...], "count": N,
+        "offset": offset, "limit": effective_limit}``.
+        On TCC denial: ``{"success": False, "error_type":
+        "authorization_denied", "status": ..., "error": ..., "remediation":
+        ...}``.
+        On bad input: ``{"success": False, "error_type":
+        "validation_error", "error": ...}``.
+        On unexpected failure: ``{"success": False, "error_type":
+        "unknown", "error": ...}``.
+    """
+    if offset < 0:
+        return {
+            "success": False,
+            "error": "offset must be >= 0",
+            "error_type": "validation_error",
+        }
+    if limit < 1:
+        return {
+            "success": False,
+            "error": "limit must be >= 1",
+            "error_type": "validation_error",
+        }
+
+    effective_limit = min(limit, _LIST_CONTACTS_MAX)
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    try:
+        contacts = connector._run_cn_enumerate_contacts(
+            offset=offset, limit=effective_limit
+        )
+    except Exception as exc:
+        logger.error("list_contacts fetch failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"Fetch failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {
+        "success": True,
+        "contacts": contacts,
+        "count": len(contacts),
+        "offset": offset,
+        "limit": effective_limit,
+    }
 
 
 def main() -> None:

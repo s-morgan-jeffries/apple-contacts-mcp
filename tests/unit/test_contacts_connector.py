@@ -241,3 +241,161 @@ def test_run_cn_authorization_status_unknown_value_falls_back_to_not_determined(
     with caplog.at_level("WARNING", logger="apple_contacts_mcp.contacts_connector"):
         assert connector._run_cn_authorization_status() == "notDetermined"
     assert any("Unknown CN authorization status" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _run_cn_enumerate_contacts
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_contact(
+    cn_id: str, given: str, family: str, org: str
+) -> MagicMock:
+    """Build a fake CNContact with the four selectors list_contacts reads."""
+    c = MagicMock(name=f"CNContact({cn_id})")
+    c.identifier.return_value = cn_id
+    c.givenName.return_value = given
+    c.familyName.return_value = family
+    c.organizationName.return_value = org
+    return c
+
+
+def _install_fake_contacts_for_enumerate(
+    monkeypatch: pytest.MonkeyPatch,
+    contacts: list[MagicMock],
+    enumerate_succeeds: bool = True,
+    fake_error: object | None = None,
+) -> MagicMock:
+    """Install a fake `Contacts` module + a store whose enumerate iterates
+    `contacts`, honoring the `stop_ptr[0] = True` short-circuit.
+
+    Returns the CNContactStore mock for assertion of call args.
+    """
+    fake_module = types.ModuleType("Contacts")
+    fake_module.CNContactIdentifierKey = "id_key"  # type: ignore[attr-defined]
+    fake_module.CNContactGivenNameKey = "given_key"  # type: ignore[attr-defined]
+    fake_module.CNContactFamilyNameKey = "family_key"  # type: ignore[attr-defined]
+    fake_module.CNContactOrganizationNameKey = "org_key"  # type: ignore[attr-defined]
+
+    # CNContactFetchRequest.alloc().initWithKeysToFetch_(keys) returns a request stub.
+    fetch_request_stub = MagicMock(name="CNContactFetchRequest_instance")
+    fetch_request_class = MagicMock(name="CNContactFetchRequest")
+    fetch_request_class.alloc.return_value.initWithKeysToFetch_.return_value = (
+        fetch_request_stub
+    )
+    fake_module.CNContactFetchRequest = fetch_request_class  # type: ignore[attr-defined]
+
+    cn_store_class = MagicMock(name="CNContactStore")
+    store_instance = MagicMock(name="store_instance")
+
+    def fake_enumerate(
+        _req: Any, _err: Any, callback: Any
+    ) -> tuple[bool, object | None]:
+        if not enumerate_succeeds:
+            return False, fake_error
+        for contact in contacts:
+            stop = [False]
+            callback(contact, stop)
+            if stop[0]:
+                break
+        return True, None
+
+    store_instance.enumerateContactsWithFetchRequest_error_usingBlock_.side_effect = (
+        fake_enumerate
+    )
+    cn_store_class.alloc.return_value.init.return_value = store_instance
+    fake_module.CNContactStore = cn_store_class  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "Contacts", fake_module)
+    return store_instance
+
+
+def test_enumerate_returns_empty_list_when_store_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_contacts_for_enumerate(monkeypatch, contacts=[])
+    connector = ContactsConnector()
+    assert connector._run_cn_enumerate_contacts(offset=0, limit=10) == []
+
+
+def test_enumerate_returns_all_when_under_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = [
+        _make_fake_contact(f"id-{i}", f"Given{i}", f"Family{i}", f"Org{i}")
+        for i in range(5)
+    ]
+    _install_fake_contacts_for_enumerate(monkeypatch, contacts=fakes)
+    connector = ContactsConnector()
+    result = connector._run_cn_enumerate_contacts(offset=0, limit=10)
+    assert len(result) == 5
+    assert result[0] == {
+        "id": "id-0",
+        "given_name": "Given0",
+        "family_name": "Family0",
+        "organization": "Org0",
+    }
+
+
+def test_enumerate_stops_after_limit_via_stop_ptr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = [
+        _make_fake_contact(f"id-{i}", f"G{i}", f"F{i}", f"O{i}") for i in range(10)
+    ]
+    _install_fake_contacts_for_enumerate(monkeypatch, contacts=fakes)
+    connector = ContactsConnector()
+    result = connector._run_cn_enumerate_contacts(offset=0, limit=3)
+    assert [c["id"] for c in result] == ["id-0", "id-1", "id-2"]
+    # Confirm later contacts' selectors were never accessed (stop short-circuited).
+    assert fakes[3].identifier.call_count == 0
+
+
+def test_enumerate_skips_offset_then_returns_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = [
+        _make_fake_contact(f"id-{i}", f"G{i}", f"F{i}", f"O{i}") for i in range(10)
+    ]
+    _install_fake_contacts_for_enumerate(monkeypatch, contacts=fakes)
+    connector = ContactsConnector()
+    result = connector._run_cn_enumerate_contacts(offset=4, limit=3)
+    assert [c["id"] for c in result] == ["id-4", "id-5", "id-6"]
+
+
+def test_enumerate_offset_past_end_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = [
+        _make_fake_contact(f"id-{i}", "G", "F", "O") for i in range(5)
+    ]
+    _install_fake_contacts_for_enumerate(monkeypatch, contacts=fakes)
+    connector = ContactsConnector()
+    assert connector._run_cn_enumerate_contacts(offset=20, limit=3) == []
+
+
+def test_enumerate_dict_keys_are_exactly_the_four_basic_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = [_make_fake_contact("id-0", "Alice", "Adams", "Acme")]
+    _install_fake_contacts_for_enumerate(monkeypatch, contacts=fakes)
+    connector = ContactsConnector()
+    [entry] = connector._run_cn_enumerate_contacts(offset=0, limit=1)
+    assert set(entry.keys()) == {"id", "given_name", "family_name", "organization"}
+
+
+def test_enumerate_raises_contacts_error_when_store_returns_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_error = MagicMock(name="NSError")
+    fake_error.__str__.return_value = "boom"
+    _install_fake_contacts_for_enumerate(
+        monkeypatch,
+        contacts=[],
+        enumerate_succeeds=False,
+        fake_error=fake_error,
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_enumerate_contacts(offset=0, limit=10)
+    assert "boom" in str(exc_info.value)
