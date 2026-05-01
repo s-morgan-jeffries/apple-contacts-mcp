@@ -193,3 +193,51 @@ def test_run_cn_request_access_callback_from_other_thread(
     _install_fake_contacts_module(monkeypatch, store_factory=store)
     connector = ContactsConnector(timeout=2.0)
     assert connector._run_cn_request_access() is True
+
+
+# ---------------------------------------------------------------------------
+# _run_cn_authorization_status
+# ---------------------------------------------------------------------------
+
+
+def _install_contacts_with_status(
+    monkeypatch: pytest.MonkeyPatch, raw_status: int
+) -> MagicMock:
+    """Install a fake `Contacts` module whose CNContactStore.authorizationStatusForEntityType_
+    returns the given int. Returns the CNContactStore mock for assertions."""
+    fake_module = types.ModuleType("Contacts")
+    cn_store_class = MagicMock(name="CNContactStore")
+    cn_store_class.authorizationStatusForEntityType_.return_value = raw_status
+    fake_module.CNContactStore = cn_store_class  # type: ignore[attr-defined]
+    fake_module.CNEntityTypeContacts = 7  # arbitrary; just must round-trip
+    monkeypatch.setitem(sys.modules, "Contacts", fake_module)
+    return cn_store_class
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (0, "notDetermined"),
+        (1, "restricted"),
+        (2, "denied"),
+        (3, "authorized"),
+        (4, "limited"),
+    ],
+)
+def test_run_cn_authorization_status_maps_each_known_value(
+    raw: int, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cn_store_class = _install_contacts_with_status(monkeypatch, raw)
+    connector = ContactsConnector()
+    assert connector._run_cn_authorization_status() == expected
+    cn_store_class.authorizationStatusForEntityType_.assert_called_once_with(7)
+
+
+def test_run_cn_authorization_status_unknown_value_falls_back_to_not_determined(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _install_contacts_with_status(monkeypatch, 99)
+    connector = ContactsConnector()
+    with caplog.at_level("WARNING", logger="apple_contacts_mcp.contacts_connector"):
+        assert connector._run_cn_authorization_status() == "notDetermined"
+    assert any("Unknown CN authorization status" in r.message for r in caplog.records)
