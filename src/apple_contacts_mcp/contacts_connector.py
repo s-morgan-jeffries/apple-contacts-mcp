@@ -25,6 +25,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_CN_AUTHORIZATION_STATUS: dict[int, str] = {
+    0: "notDetermined",
+    1: "restricted",
+    2: "denied",
+    3: "authorized",
+    4: "limited",  # macOS 14+
+}
+
 
 class ContactsConnector:
     """Backend connector for Apple Contacts operations."""
@@ -81,6 +89,24 @@ class ContactsConnector:
 
             self._store = CNContactStore.alloc().init()
         return self._store
+
+    def _run_cn_authorization_status(self) -> str:
+        """Return the current TCC status string for the Contacts entity.
+
+        Wraps the synchronous class method
+        +[CNContactStore authorizationStatusForEntityType:]. No permission
+        is required to call this; it's a status getter.
+        """
+        from Contacts import CNContactStore, CNEntityTypeContacts
+
+        raw = int(
+            CNContactStore.authorizationStatusForEntityType_(CNEntityTypeContacts)
+        )
+        status = _CN_AUTHORIZATION_STATUS.get(raw)
+        if status is None:
+            logger.warning("Unknown CN authorization status: %d", raw)
+            return "notDetermined"
+        return status
 
     def _run_cn_request_access(self) -> bool:
         """Request TCC access to the Contacts entity. First `_run_cn_*` helper.
