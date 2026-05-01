@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
-from apple_contacts_mcp.server import check_authorization
+from apple_contacts_mcp.exceptions import ContactsError, ContactsTimeoutError
+from apple_contacts_mcp.server import check_authorization, list_contacts
 
 
 class TestCheckAuthorization:
@@ -53,3 +54,170 @@ class TestCheckAuthorization:
             result = check_authorization()
         assert "remediation" not in result
         assert set(result.keys()) == {"success", "status"}
+
+
+# ---------------------------------------------------------------------------
+# list_contacts
+# ---------------------------------------------------------------------------
+
+
+_FAKE_CONTACTS = [
+    {"id": "id-0", "given_name": "Alice", "family_name": "Adams", "organization": "Acme"},
+    {"id": "id-1", "given_name": "Bob", "family_name": "Brown", "organization": ""},
+]
+
+
+class TestListContactsValidation:
+    def test_negative_offset_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = list_contacts(offset=-1)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "offset" in result["error"]
+        mock_connector._run_cn_authorization_status.assert_not_called()
+        mock_connector._run_cn_enumerate_contacts.assert_not_called()
+
+    def test_zero_limit_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = list_contacts(limit=0)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "limit" in result["error"]
+        mock_connector._run_cn_enumerate_contacts.assert_not_called()
+
+
+class TestListContactsAuthFlow:
+    @pytest.mark.parametrize("status", ["authorized", "limited"])
+    def test_granted_status_proceeds_to_fetch(self, status: str) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = status
+            mock_connector._run_cn_enumerate_contacts.return_value = _FAKE_CONTACTS
+            result = list_contacts()
+        assert result["success"] is True
+        assert result["contacts"] == _FAKE_CONTACTS
+        assert result["count"] == 2
+        assert result["offset"] == 0
+        assert result["limit"] == 50
+        mock_connector._run_cn_enumerate_contacts.assert_called_once_with(
+            offset=0, limit=50
+        )
+        mock_connector._run_cn_request_access.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "status,remediation_substr",
+        [
+            ("denied", "System Settings"),
+            ("restricted", "administrator"),
+        ],
+    )
+    def test_ungranted_status_returns_auth_denied(
+        self, status: str, remediation_substr: str
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = status
+            result = list_contacts()
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        assert result["status"] == status
+        assert remediation_substr in result["remediation"]
+        mock_connector._run_cn_enumerate_contacts.assert_not_called()
+        mock_connector._run_cn_request_access.assert_not_called()
+
+    def test_not_determined_then_granted_proceeds(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.side_effect = [
+                "notDetermined",
+                "authorized",
+            ]
+            mock_connector._run_cn_request_access.return_value = True
+            mock_connector._run_cn_enumerate_contacts.return_value = []
+            result = list_contacts()
+        assert result["success"] is True
+        mock_connector._run_cn_request_access.assert_called_once()
+        mock_connector._run_cn_enumerate_contacts.assert_called_once()
+
+    def test_not_determined_then_denied_returns_auth_denied(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.side_effect = [
+                "notDetermined",
+                "denied",
+            ]
+            mock_connector._run_cn_request_access.return_value = False
+            result = list_contacts()
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        assert result["status"] == "denied"
+        mock_connector._run_cn_enumerate_contacts.assert_not_called()
+
+    def test_request_access_timeout_returns_pending_message(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "notDetermined"
+            mock_connector._run_cn_request_access.side_effect = ContactsTimeoutError(
+                "no answer"
+            )
+            result = list_contacts()
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        assert result["status"] == "notDetermined"
+        assert "awaiting" in result["error"]
+        mock_connector._run_cn_enumerate_contacts.assert_not_called()
+
+    def test_authorization_status_raises_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.side_effect = RuntimeError(
+                "PyObjC broke"
+            )
+            result = list_contacts()
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "PyObjC broke" in result["error"]
+
+
+class TestListContactsLimitClamp:
+    def test_limit_above_cap_is_clamped_to_200(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_enumerate_contacts.return_value = []
+            result = list_contacts(limit=500)
+        assert result["limit"] == 200
+        mock_connector._run_cn_enumerate_contacts.assert_called_once_with(
+            offset=0, limit=200
+        )
+
+    def test_limit_below_cap_is_passed_through(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_enumerate_contacts.return_value = []
+            result = list_contacts(limit=10)
+        assert result["limit"] == 10
+        mock_connector._run_cn_enumerate_contacts.assert_called_once_with(
+            offset=0, limit=10
+        )
+
+
+class TestListContactsFetchFailure:
+    def test_enumerate_raises_returns_unknown_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_enumerate_contacts.side_effect = ContactsError(
+                "enumerate boom"
+            )
+            result = list_contacts()
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "enumerate boom" in result["error"]
+
+
+class TestListContactsResponseShape:
+    def test_success_response_has_exact_keys(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_enumerate_contacts.return_value = _FAKE_CONTACTS
+            result = list_contacts()
+        assert set(result.keys()) == {
+            "success",
+            "contacts",
+            "count",
+            "offset",
+            "limit",
+        }

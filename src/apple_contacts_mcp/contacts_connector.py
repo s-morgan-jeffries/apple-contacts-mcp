@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from .exceptions import (
     ContactsAppleScriptError,
     ContactsAuthorizationError,
+    ContactsError,
     ContactsTimeoutError,
 )
 
@@ -107,6 +108,61 @@ class ContactsConnector:
             logger.warning("Unknown CN authorization status: %d", raw)
             return "notDetermined"
         return status
+
+    def _run_cn_enumerate_contacts(
+        self, offset: int, limit: int
+    ) -> list[dict[str, str]]:
+        """Enumerate contacts and return basic-field dicts.
+
+        Implements pagination inside the enumeration callback: skip the
+        first `offset` contacts, then accumulate up to `limit` and signal
+        the framework to short-circuit via `stop_ptr[0] = True`. Without
+        the stop flag we'd pay the full O(N) walk even for a 50-element
+        page.
+        """
+        from Contacts import (
+            CNContactFamilyNameKey,
+            CNContactFetchRequest,
+            CNContactGivenNameKey,
+            CNContactIdentifierKey,
+            CNContactOrganizationNameKey,
+        )
+
+        keys = [
+            CNContactIdentifierKey,
+            CNContactGivenNameKey,
+            CNContactFamilyNameKey,
+            CNContactOrganizationNameKey,
+        ]
+        req = CNContactFetchRequest.alloc().initWithKeysToFetch_(keys)
+
+        contacts: list[dict[str, str]] = []
+        skipped = 0
+
+        def _collect(contact: Any, stop_ptr: Any) -> None:
+            nonlocal skipped
+            if skipped < offset:
+                skipped += 1
+                return
+            if len(contacts) >= limit:
+                stop_ptr[0] = True
+                return
+            contacts.append(
+                {
+                    "id": str(contact.identifier()),
+                    "given_name": str(contact.givenName()),
+                    "family_name": str(contact.familyName()),
+                    "organization": str(contact.organizationName()),
+                }
+            )
+
+        store = self._get_store()
+        ok, err = store.enumerateContactsWithFetchRequest_error_usingBlock_(
+            req, None, _collect
+        )
+        if not ok:
+            raise ContactsError(f"CN enumerate failed: {err}")
+        return contacts
 
     def _run_cn_request_access(self) -> bool:
         """Request TCC access to the Contacts entity. First `_run_cn_*` helper.
