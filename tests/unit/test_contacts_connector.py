@@ -399,3 +399,295 @@ def test_enumerate_raises_contacts_error_when_store_returns_failure(
     with pytest.raises(ContactsError) as exc_info:
         connector._run_cn_enumerate_contacts(offset=0, limit=10)
     assert "boom" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# _run_cn_unified_contact
+# ---------------------------------------------------------------------------
+
+
+_LOCALIZED_LABELS = {
+    "_$!<Mobile>!$_": "mobile",
+    "_$!<Home>!$_": "home",
+    "_$!<Work>!$_": "work",
+    "_$!<HomePage>!$_": "homepage",
+}
+
+
+def _make_phone(value: str) -> MagicMock:
+    p = MagicMock(name=f"CNPhoneNumber({value})")
+    p.stringValue.return_value = value
+    return p
+
+
+def _make_postal(**fields: str) -> MagicMock:
+    """Build a fake CNPostalAddress with all 8 selectors."""
+    a = MagicMock(name="CNPostalAddress")
+    a.street.return_value = fields.get("street", "")
+    a.subLocality.return_value = fields.get("sub_locality", "")
+    a.city.return_value = fields.get("city", "")
+    a.subAdministrativeArea.return_value = fields.get("sub_administrative_area", "")
+    a.state.return_value = fields.get("state", "")
+    a.postalCode.return_value = fields.get("postal_code", "")
+    a.country.return_value = fields.get("country", "")
+    a.ISOCountryCode.return_value = fields.get("iso_country_code", "")
+    return a
+
+
+def _make_labeled(label: str | None, value: Any) -> MagicMock:
+    lv = MagicMock(name=f"CNLabeledValue({label!r})")
+    lv.label.return_value = label
+    lv.value.return_value = value
+    return lv
+
+
+def _make_birthday(
+    year: int | None = None, month: int | None = None, day: int | None = None
+) -> MagicMock:
+    """Build a fake NSDateComponents.
+
+    `None` for any component means "set to NSIntegerMax" (the undefined
+    sentinel CN actually returns).
+    """
+    UNDEFINED = 9223372036854775807
+    bd = MagicMock(name="NSDateComponents")
+    bd.year.return_value = UNDEFINED if year is None else year
+    bd.month.return_value = UNDEFINED if month is None else month
+    bd.day.return_value = UNDEFINED if day is None else day
+    return bd
+
+
+def _make_full_contact(
+    cn_id: str = "ABCD",
+    given: str = "Alice",
+    family: str = "Adams",
+    middle: str = "M",
+    prefix: str = "Dr.",
+    suffix: str = "Jr.",
+    nickname: str = "Ali",
+    organization: str = "Acme",
+    job: str = "Engineer",
+    department: str = "R&D",
+    phones: list[MagicMock] | None = None,
+    emails: list[MagicMock] | None = None,
+    urls: list[MagicMock] | None = None,
+    postal: list[MagicMock] | None = None,
+    birthday: MagicMock | None = None,
+) -> MagicMock:
+    c = MagicMock(name=f"CNContact({cn_id})")
+    c.identifier.return_value = cn_id
+    c.givenName.return_value = given
+    c.familyName.return_value = family
+    c.middleName.return_value = middle
+    c.namePrefix.return_value = prefix
+    c.nameSuffix.return_value = suffix
+    c.nickname.return_value = nickname
+    c.organizationName.return_value = organization
+    c.jobTitle.return_value = job
+    c.departmentName.return_value = department
+    c.phoneNumbers.return_value = phones or []
+    c.emailAddresses.return_value = emails or []
+    c.urlAddresses.return_value = urls or []
+    c.postalAddresses.return_value = postal or []
+    c.birthday.return_value = birthday
+    return c
+
+
+def _install_fake_contacts_for_unified(
+    monkeypatch: pytest.MonkeyPatch,
+    contact: MagicMock | None,
+    fake_error: object | None = None,
+) -> MagicMock:
+    """Install a fake `Contacts` module + a store whose
+    unifiedContactWithIdentifier... returns (contact, fake_error).
+    """
+    fake_module = types.ModuleType("Contacts")
+    for k in (
+        "CNContactGivenNameKey",
+        "CNContactFamilyNameKey",
+        "CNContactMiddleNameKey",
+        "CNContactNamePrefixKey",
+        "CNContactNameSuffixKey",
+        "CNContactNicknameKey",
+        "CNContactOrganizationNameKey",
+        "CNContactJobTitleKey",
+        "CNContactDepartmentNameKey",
+        "CNContactPhoneNumbersKey",
+        "CNContactEmailAddressesKey",
+        "CNContactPostalAddressesKey",
+        "CNContactUrlAddressesKey",
+        "CNContactBirthdayKey",
+    ):
+        setattr(fake_module, k, k)
+
+    cn_labeled_value = MagicMock(name="CNLabeledValue")
+    cn_labeled_value.localizedStringForLabel_.side_effect = (
+        lambda raw: _LOCALIZED_LABELS.get(raw, raw)
+    )
+    fake_module.CNLabeledValue = cn_labeled_value  # type: ignore[attr-defined]
+
+    cn_store_class = MagicMock(name="CNContactStore")
+    store_instance = MagicMock(name="store_instance")
+    store_instance.unifiedContactWithIdentifier_keysToFetch_error_.return_value = (
+        contact,
+        fake_error,
+    )
+    cn_store_class.alloc.return_value.init.return_value = store_instance
+    fake_module.CNContactStore = cn_store_class  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "Contacts", fake_module)
+    return store_instance
+
+
+def test_unified_contact_returns_none_when_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_error = MagicMock(name="NSError")
+    _install_fake_contacts_for_unified(
+        monkeypatch, contact=None, fake_error=fake_error
+    )
+    connector = ContactsConnector()
+    assert connector._run_cn_unified_contact("nonexistent") is None
+
+
+def test_unified_contact_full_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    contact = _make_full_contact(
+        phones=[_make_labeled("_$!<Mobile>!$_", _make_phone("+1 555-1212"))],
+        emails=[_make_labeled("_$!<Home>!$_", "alice@example.com")],
+        urls=[_make_labeled("_$!<HomePage>!$_", "https://acme.example")],
+        postal=[
+            _make_labeled(
+                "_$!<Work>!$_",
+                _make_postal(
+                    street="1 Loop", city="Cupertino", state="CA",
+                    postal_code="95014", country="USA", iso_country_code="us",
+                ),
+            )
+        ],
+        birthday=_make_birthday(year=1990, month=5, day=15),
+    )
+    store = _install_fake_contacts_for_unified(monkeypatch, contact=contact)
+    connector = ContactsConnector()
+
+    result = connector._run_cn_unified_contact("ABCD")
+
+    assert result is not None
+    assert result["id"] == "ABCD"
+    assert result["given_name"] == "Alice"
+    assert result["family_name"] == "Adams"
+    assert result["middle_name"] == "M"
+    assert result["name_prefix"] == "Dr."
+    assert result["name_suffix"] == "Jr."
+    assert result["nickname"] == "Ali"
+    assert result["organization"] == "Acme"
+    assert result["job_title"] == "Engineer"
+    assert result["department"] == "R&D"
+    assert result["phones"] == [
+        {"label_raw": "_$!<Mobile>!$_", "label": "mobile", "value": "+1 555-1212"}
+    ]
+    assert result["emails"] == [
+        {"label_raw": "_$!<Home>!$_", "label": "home", "value": "alice@example.com"}
+    ]
+    assert result["urls"] == [
+        {
+            "label_raw": "_$!<HomePage>!$_",
+            "label": "homepage",
+            "value": "https://acme.example",
+        }
+    ]
+    assert result["postal_addresses"] == [
+        {
+            "label_raw": "_$!<Work>!$_",
+            "label": "work",
+            "street": "1 Loop",
+            "sub_locality": "",
+            "city": "Cupertino",
+            "sub_administrative_area": "",
+            "state": "CA",
+            "postal_code": "95014",
+            "country": "USA",
+            "iso_country_code": "us",
+        }
+    ]
+    assert result["birthday"] == {"year": 1990, "month": 5, "day": 15}
+
+    store.unifiedContactWithIdentifier_keysToFetch_error_.assert_called_once()
+    args, _ = store.unifiedContactWithIdentifier_keysToFetch_error_.call_args
+    assert args[0] == "ABCD"
+    assert "CNContactGivenNameKey" in args[1]
+    assert "CNContactBirthdayKey" in args[1]
+
+
+def test_unified_contact_empty_multivalued_fields_become_empty_lists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contact = _make_full_contact()  # all defaults; no phones/emails/etc.
+    _install_fake_contacts_for_unified(monkeypatch, contact=contact)
+    connector = ContactsConnector()
+
+    result = connector._run_cn_unified_contact("ABCD")
+    assert result is not None
+    assert result["phones"] == []
+    assert result["emails"] == []
+    assert result["urls"] == []
+    assert result["postal_addresses"] == []
+    assert result["birthday"] is None
+
+
+def test_unified_contact_custom_label_passes_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contact = _make_full_contact(
+        phones=[_make_labeled("buzzer", _make_phone("+1 555-9999"))]
+    )
+    _install_fake_contacts_for_unified(monkeypatch, contact=contact)
+    connector = ContactsConnector()
+
+    result = connector._run_cn_unified_contact("ABCD")
+    assert result is not None
+    assert result["phones"] == [
+        {"label_raw": "buzzer", "label": "buzzer", "value": "+1 555-9999"}
+    ]
+
+
+def test_unified_contact_none_label_becomes_empty_strings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contact = _make_full_contact(
+        emails=[_make_labeled(None, "anon@example.com")]
+    )
+    _install_fake_contacts_for_unified(monkeypatch, contact=contact)
+    connector = ContactsConnector()
+
+    result = connector._run_cn_unified_contact("ABCD")
+    assert result is not None
+    assert result["emails"] == [
+        {"label_raw": "", "label": "", "value": "anon@example.com"}
+    ]
+
+
+def test_unified_contact_birthday_year_undefined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contact = _make_full_contact(
+        birthday=_make_birthday(year=None, month=5, day=15)
+    )
+    _install_fake_contacts_for_unified(monkeypatch, contact=contact)
+    connector = ContactsConnector()
+
+    result = connector._run_cn_unified_contact("ABCD")
+    assert result is not None
+    assert result["birthday"] == {"month": 5, "day": 15}
+    assert "year" not in result["birthday"]
+
+
+def test_unified_contact_birthday_all_components_zero_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contact = _make_full_contact(birthday=_make_birthday(year=0, month=0, day=0))
+    _install_fake_contacts_for_unified(monkeypatch, contact=contact)
+    connector = ContactsConnector()
+
+    result = connector._run_cn_unified_contact("ABCD")
+    assert result is not None
+    assert result["birthday"] is None

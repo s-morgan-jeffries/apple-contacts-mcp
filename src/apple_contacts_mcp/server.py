@@ -185,6 +185,63 @@ def list_contacts(offset: int = 0, limit: int = 50) -> dict[str, Any]:
     }
 
 
+@mcp.tool()
+def get_contact(identifier: str) -> dict[str, Any]:
+    """Fetch a single contact by its CN identifier with all P1 fields.
+
+    Get an identifier from ``list_contacts`` or ``search_contacts``, then
+    call this for the full record (name parts, organization, phones,
+    emails, postal addresses, urls, birthday).
+
+    Args:
+        identifier: The contact's CN identifier (UUID-shaped string).
+
+    Returns:
+        On success: ``{"success": True, "contact": {...full P1 fields...}}``.
+        On missing identifier (no such contact): ``{"success": False,
+        "error_type": "not_found", "error": ...}``.
+        On bad input (empty string): ``{"success": False, "error_type":
+        "validation_error", "error": ...}``.
+        On TCC denial: same shape as ``list_contacts`` (status,
+        remediation).
+        On unexpected failure: ``{"success": False, "error_type":
+        "unknown", "error": ...}``.
+
+    Each entry in the labeled-value families (phones, emails, urls,
+    postal_addresses) carries both ``label_raw`` (the
+    ``_$!<...>!$_`` token) and ``label`` (the human string).
+    """
+    if not identifier or not identifier.strip():
+        return {
+            "success": False,
+            "error": "identifier must be a non-empty string",
+            "error_type": "validation_error",
+        }
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    try:
+        contact = connector._run_cn_unified_contact(identifier)
+    except Exception as exc:
+        logger.error("get_contact fetch failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"Fetch failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    if contact is None:
+        return {
+            "success": False,
+            "error": f"No contact found with identifier {identifier!r}",
+            "error_type": "not_found",
+        }
+
+    return {"success": True, "contact": contact}
+
+
 def main() -> None:
     """Start the MCP server."""
     mcp.run()
