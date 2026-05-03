@@ -23,3 +23,9 @@ class ContactsTimeoutError(ContactsError):
     """A subprocess or CN async operation exceeded its timeout."""
 
     pass
+
+
+class ContactsNotFoundError(ContactsError):
+    """A referenced CN object (contact or group) was not found."""
+
+    pass

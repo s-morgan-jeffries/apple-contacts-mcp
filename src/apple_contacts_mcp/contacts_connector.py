@@ -19,6 +19,7 @@ from .exceptions import (
     ContactsAppleScriptError,
     ContactsAuthorizationError,
     ContactsError,
+    ContactsNotFoundError,
     ContactsTimeoutError,
 )
 
@@ -165,6 +166,58 @@ class ContactsConnector:
             raise ContactsError(f"CN enumerate failed: {err}")
         return contacts
 
+    def _run_cn_fetch_group(self, identifier: str) -> Any | None:
+        """Fetch a CNGroup by its identifier.
+
+        Returns the CNGroup object (PyObjC-typed, not serialized) or None
+        if no group matches. Used by destructive tools that need to
+        add/remove members — they want the live object to feed into
+        CNSaveRequest.
+        """
+        from Contacts import CNGroup
+
+        pred = CNGroup.predicateForGroupsWithIdentifiers_([identifier])
+        store = self._get_store()
+        results, err = store.groupsMatchingPredicate_error_(pred, None)
+        if results is None:
+            raise ContactsError(f"CN group fetch failed: {err}")
+        if len(results) == 0:
+            return None
+        return results[0]
+
+    def _run_cn_create_contact(
+        self, fields: dict[str, Any], group_identifier: str | None
+    ) -> str:
+        """Create a contact in the default container, optionally also
+        adding it to a group, in a single atomic CNSaveRequest.
+
+        Returns the new contact's CN identifier (CN populates the
+        CNMutableContact's identifier in-place after save).
+        """
+        from Contacts import CNSaveRequest
+
+        mutable = _build_mutable_contact(fields)
+
+        group = None
+        if group_identifier is not None:
+            group = self._run_cn_fetch_group(group_identifier)
+            if group is None:
+                raise ContactsNotFoundError(
+                    f"Group not found: {group_identifier!r}"
+                )
+
+        save_req = CNSaveRequest.alloc().init()
+        save_req.addContact_toContainerWithIdentifier_(mutable, None)
+        if group is not None:
+            save_req.addMember_toGroup_(mutable, group)
+
+        store = self._get_store()
+        ok, err = store.executeSaveRequest_error_(save_req, None)
+        if not ok:
+            raise ContactsError(f"CN save failed: {err}")
+
+        return str(mutable.identifier())
+
     def _run_cn_search_contacts(
         self, query: str, limit: int
     ) -> list[dict[str, str]]:
@@ -298,6 +351,124 @@ class ContactsConnector:
             raise ContactsAuthorizationError(str(result["error"]))
 
         return bool(result["granted"])
+
+
+# ---------------------------------------------------------------------------
+# CNContact builders (module-private; inverse of serializers below)
+# ---------------------------------------------------------------------------
+
+
+def _build_mutable_contact(fields: dict[str, Any]) -> Any:
+    """Build a CNMutableContact from a dict shaped like _serialize_contact's
+    output (minus ``id``). Only sets fields the caller provided — empty
+    strings and missing keys leave the corresponding CN property unset.
+    """
+    from Contacts import (
+        CNLabeledValue,
+        CNMutableContact,
+        CNPhoneNumber,
+    )
+    from Foundation import NSDateComponents
+
+    c = CNMutableContact.alloc().init()
+
+    if v := fields.get("given_name"):
+        c.setGivenName_(v)
+    if v := fields.get("family_name"):
+        c.setFamilyName_(v)
+    if v := fields.get("middle_name"):
+        c.setMiddleName_(v)
+    if v := fields.get("name_prefix"):
+        c.setNamePrefix_(v)
+    if v := fields.get("name_suffix"):
+        c.setNameSuffix_(v)
+    if v := fields.get("nickname"):
+        c.setNickname_(v)
+    if v := fields.get("organization"):
+        c.setOrganizationName_(v)
+    if v := fields.get("job_title"):
+        c.setJobTitle_(v)
+    if v := fields.get("department"):
+        c.setDepartmentName_(v)
+
+    if phones := fields.get("phones"):
+        c.setPhoneNumbers_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    p.get("label_raw", ""),
+                    CNPhoneNumber.phoneNumberWithStringValue_(p["value"]),
+                )
+                for p in phones
+            ]
+        )
+    if emails := fields.get("emails"):
+        c.setEmailAddresses_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    e.get("label_raw", ""), e["value"]
+                )
+                for e in emails
+            ]
+        )
+    if urls := fields.get("urls"):
+        c.setUrlAddresses_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    u.get("label_raw", ""), u["value"]
+                )
+                for u in urls
+            ]
+        )
+    if postal := fields.get("postal_addresses"):
+        c.setPostalAddresses_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    a.get("label_raw", ""), _build_mutable_postal_address(a)
+                )
+                for a in postal
+            ]
+        )
+
+    if bday := fields.get("birthday"):
+        c.setBirthday_(_build_birthday_components(bday, NSDateComponents))
+
+    return c
+
+
+def _build_mutable_postal_address(a: dict[str, str]) -> Any:
+    from Contacts import CNMutablePostalAddress
+
+    addr = CNMutablePostalAddress.alloc().init()
+    if v := a.get("street"):
+        addr.setStreet_(v)
+    if v := a.get("sub_locality"):
+        addr.setSubLocality_(v)
+    if v := a.get("city"):
+        addr.setCity_(v)
+    if v := a.get("sub_administrative_area"):
+        addr.setSubAdministrativeArea_(v)
+    if v := a.get("state"):
+        addr.setState_(v)
+    if v := a.get("postal_code"):
+        addr.setPostalCode_(v)
+    if v := a.get("country"):
+        addr.setCountry_(v)
+    if v := a.get("iso_country_code"):
+        addr.setISOCountryCode_(v)
+    return addr
+
+
+def _build_birthday_components(
+    bday: dict[str, int], NSDateComponents: Any
+) -> Any:
+    dc = NSDateComponents.alloc().init()
+    if y := bday.get("year"):
+        dc.setYear_(y)
+    if m := bday.get("month"):
+        dc.setMonth_(m)
+    if d := bday.get("day"):
+        dc.setDay_(d)
+    return dc
 
 
 # ---------------------------------------------------------------------------

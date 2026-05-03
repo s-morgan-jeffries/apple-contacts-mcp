@@ -7,9 +7,14 @@ from unittest.mock import patch
 
 import pytest
 
-from apple_contacts_mcp.exceptions import ContactsError, ContactsTimeoutError
+from apple_contacts_mcp.exceptions import (
+    ContactsError,
+    ContactsNotFoundError,
+    ContactsTimeoutError,
+)
 from apple_contacts_mcp.server import (
     check_authorization,
+    create_contact,
     get_contact,
     list_contacts,
     search_contacts,
@@ -421,3 +426,208 @@ class TestSearchContactsConnectorRaises:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# create_contact
+# ---------------------------------------------------------------------------
+
+
+class TestCreateContactValidation:
+    def test_all_empty_names_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = create_contact()
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_authorization_status.assert_not_called()
+        mock_connector._run_cn_create_contact.assert_not_called()
+
+    def test_whitespace_only_names_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = create_contact(given_name="   ", family_name="\t\n")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_create_contact.assert_not_called()
+
+    def test_email_without_at_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = create_contact(
+                given_name="Alice",
+                emails=[{"label_raw": "", "value": "no-at-sign"}],
+            )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "@" in result["error"]
+        mock_connector._run_cn_create_contact.assert_not_called()
+
+    def test_phone_with_empty_value_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = create_contact(
+                given_name="Alice", phones=[{"label_raw": "", "value": ""}]
+            )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_create_contact.assert_not_called()
+
+    def test_url_with_empty_value_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector"):
+            result = create_contact(
+                given_name="Alice", urls=[{"label_raw": "", "value": ""}]
+            )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+
+    def test_postal_address_all_empty_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector"):
+            result = create_contact(
+                given_name="Alice",
+                postal_addresses=[{"label_raw": "_$!<Home>!$_"}],
+            )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+
+    @pytest.mark.parametrize(
+        "bday",
+        [
+            {"month": 0, "day": 1},
+            {"month": 13, "day": 1},
+            {"month": 5, "day": 0},
+            {"month": 5, "day": 32},
+            {"year": -1, "month": 5, "day": 15},
+        ],
+    )
+    def test_invalid_birthday_returns_validation_error(
+        self, bday: dict[str, int]
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = create_contact(given_name="Alice", birthday=bday)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_create_contact.assert_not_called()
+
+
+class TestCreateContactAuthFlow:
+    def test_auth_denied_passthrough_skips_save(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = create_contact(given_name="Alice")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_cn_create_contact.assert_not_called()
+
+
+class TestCreateContactTestModeSafety:
+    def test_test_mode_without_group_arg_blocked(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        from apple_contacts_mcp.security import _get_test_group_identifiers
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = create_contact(given_name="Alice")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_connector._run_cn_create_contact.assert_not_called()
+
+    def test_test_mode_with_matching_group_proceeds(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        from apple_contacts_mcp.security import _get_test_group_identifiers
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_contact.return_value = "NEW-ID"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                # Name matching falls back when subprocess fails — name "MCP-Test" matches.
+                result = create_contact(
+                    given_name="Alice", group_identifier="MCP-Test"
+                )
+        assert result["success"] is True
+        assert result["identifier"] == "NEW-ID"
+        assert result["group_id"] == "MCP-Test"
+
+
+class TestCreateContactHappyPath:
+    def test_minimal_returns_identifier_no_group(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_contact.return_value = "NEW-ID-1"
+            result = create_contact(given_name="Alice")
+        assert result == {"success": True, "identifier": "NEW-ID-1"}
+        mock_connector._run_cn_create_contact.assert_called_once()
+        kwargs = mock_connector._run_cn_create_contact.call_args.kwargs
+        assert kwargs["group_identifier"] is None
+        assert kwargs["fields"]["given_name"] == "Alice"
+
+    def test_with_group_includes_group_id_in_response(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_contact.return_value = "NEW-ID-2"
+            result = create_contact(
+                given_name="Alice", group_identifier="GROUP-XYZ"
+            )
+        assert result == {
+            "success": True,
+            "identifier": "NEW-ID-2",
+            "group_id": "GROUP-XYZ",
+        }
+
+    def test_full_field_set_passes_through_to_connector(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_contact.return_value = "NEW"
+            create_contact(
+                given_name="Alice",
+                family_name="Adams",
+                organization="Acme",
+                phones=[{"label_raw": "_$!<Mobile>!$_", "value": "+1 555-1212"}],
+                emails=[{"label_raw": "", "value": "alice@example.com"}],
+                urls=[{"label_raw": "", "value": "https://example.com"}],
+                postal_addresses=[
+                    {
+                        "label_raw": "_$!<Home>!$_",
+                        "city": "Cupertino",
+                    }
+                ],
+                birthday={"year": 1990, "month": 5, "day": 15},
+            )
+        kwargs = mock_connector._run_cn_create_contact.call_args.kwargs
+        fields = kwargs["fields"]
+        assert fields["given_name"] == "Alice"
+        assert fields["family_name"] == "Adams"
+        assert fields["organization"] == "Acme"
+        assert len(fields["phones"]) == 1
+        assert fields["birthday"] == {"year": 1990, "month": 5, "day": 15}
+
+
+class TestCreateContactNotFound:
+    def test_group_not_found_maps_to_not_found(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_contact.side_effect = (
+                ContactsNotFoundError("Group not found: 'BAD-GROUP'")
+            )
+            result = create_contact(
+                given_name="Alice", group_identifier="BAD-GROUP"
+            )
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        assert "BAD-GROUP" in result["error"]
+
+
+class TestCreateContactSaveFailure:
+    def test_cn_save_error_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_contact.side_effect = ContactsError(
+                "save boom"
+            )
+            result = create_contact(given_name="Alice")
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "save boom" in result["error"]

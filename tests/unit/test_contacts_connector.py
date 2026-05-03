@@ -21,6 +21,7 @@ from apple_contacts_mcp.exceptions import (
     ContactsAppleScriptError,
     ContactsAuthorizationError,
     ContactsError,
+    ContactsNotFoundError,
     ContactsTimeoutError,
 )
 
@@ -816,3 +817,288 @@ def test_search_raises_contacts_error_when_results_is_none(
     with pytest.raises(ContactsError) as exc_info:
         connector._run_cn_search_contacts(query="x", limit=200)
     assert "boom" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# _run_cn_fetch_group + _run_cn_create_contact
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_contacts_for_create(
+    monkeypatch: pytest.MonkeyPatch,
+    group_results: list[Any] | None = None,
+    save_succeeds: bool = True,
+    fake_save_error: Any | None = None,
+    new_identifier: str = "NEW-ID-1234",
+) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
+    """Install fake Contacts + Foundation modules + a store that:
+      - groupsMatchingPredicate_error_ returns (group_results, None) (or
+        (None, error) if group_results is None to simulate error path).
+      - executeSaveRequest_error_ returns (save_succeeds, fake_save_error).
+      - CNMutableContact.alloc().init() returns a MagicMock whose
+        .identifier() returns `new_identifier` (CN populates it post-save).
+
+    Returns (CNContactStore_class, store_instance, CNMutableContact_class,
+    CNSaveRequest_instance) for assertions.
+    """
+    fake_contacts = types.ModuleType("Contacts")
+
+    cn_mutable_contact_class = MagicMock(name="CNMutableContact")
+    mutable_instance = MagicMock(name="mutable_contact_instance")
+    mutable_instance.identifier.return_value = new_identifier
+    cn_mutable_contact_class.alloc.return_value.init.return_value = mutable_instance
+    fake_contacts.CNMutableContact = cn_mutable_contact_class  # type: ignore[attr-defined]
+
+    cn_postal_class = MagicMock(name="CNMutablePostalAddress")
+    postal_instance = MagicMock(name="postal_instance")
+    cn_postal_class.alloc.return_value.init.return_value = postal_instance
+    fake_contacts.CNMutablePostalAddress = cn_postal_class  # type: ignore[attr-defined]
+
+    cn_phone_class = MagicMock(name="CNPhoneNumber")
+    cn_phone_class.phoneNumberWithStringValue_.side_effect = (
+        lambda v: f"PhoneNumber({v})"
+    )
+    fake_contacts.CNPhoneNumber = cn_phone_class  # type: ignore[attr-defined]
+
+    cn_labeled_class = MagicMock(name="CNLabeledValue")
+    cn_labeled_class.labeledValueWithLabel_value_.side_effect = (
+        lambda lbl, val: ("labeled", lbl, val)
+    )
+    fake_contacts.CNLabeledValue = cn_labeled_class  # type: ignore[attr-defined]
+
+    cn_save_request_class = MagicMock(name="CNSaveRequest")
+    save_request_instance = MagicMock(name="save_request_instance")
+    cn_save_request_class.alloc.return_value.init.return_value = save_request_instance
+    fake_contacts.CNSaveRequest = cn_save_request_class  # type: ignore[attr-defined]
+
+    cn_group_class = MagicMock(name="CNGroup")
+    cn_group_class.predicateForGroupsWithIdentifiers_.return_value = "GROUP_PRED"
+    fake_contacts.CNGroup = cn_group_class  # type: ignore[attr-defined]
+
+    cn_store_class = MagicMock(name="CNContactStore")
+    store_instance = MagicMock(name="store_instance")
+    if group_results is None:
+        store_instance.groupsMatchingPredicate_error_.return_value = (
+            None,
+            MagicMock(name="NSError(group_fetch)"),
+        )
+    else:
+        store_instance.groupsMatchingPredicate_error_.return_value = (
+            group_results,
+            None,
+        )
+    store_instance.executeSaveRequest_error_.return_value = (
+        save_succeeds,
+        fake_save_error,
+    )
+    cn_store_class.alloc.return_value.init.return_value = store_instance
+    fake_contacts.CNContactStore = cn_store_class  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "Contacts", fake_contacts)
+
+    fake_foundation = types.ModuleType("Foundation")
+    nsdc_class = MagicMock(name="NSDateComponents")
+    nsdc_instance = MagicMock(name="nsdc_instance")
+    nsdc_class.alloc.return_value.init.return_value = nsdc_instance
+    fake_foundation.NSDateComponents = nsdc_class  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "Foundation", fake_foundation)
+
+    return cn_store_class, store_instance, cn_mutable_contact_class, save_request_instance
+
+
+# ----- _run_cn_fetch_group ----------------------------------------------------
+
+
+def test_fetch_group_returns_group_when_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_group = MagicMock(name="CNGroup_instance")
+    _install_fake_contacts_for_create(monkeypatch, group_results=[fake_group])
+    connector = ContactsConnector()
+    assert connector._run_cn_fetch_group("group-id") is fake_group
+
+
+def test_fetch_group_returns_none_when_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_contacts_for_create(monkeypatch, group_results=[])
+    connector = ContactsConnector()
+    assert connector._run_cn_fetch_group("missing") is None
+
+
+def test_fetch_group_raises_on_cn_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_contacts_for_create(monkeypatch, group_results=None)
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError):
+        connector._run_cn_fetch_group("any")
+
+
+# ----- _run_cn_create_contact -------------------------------------------------
+
+
+def test_create_contact_minimal_returns_new_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, store, _, save_req = _install_fake_contacts_for_create(
+        monkeypatch, new_identifier="NEW-ID-1"
+    )
+    connector = ContactsConnector()
+    result = connector._run_cn_create_contact(
+        fields={"given_name": "Alice"}, group_identifier=None
+    )
+    assert result == "NEW-ID-1"
+    save_req.addContact_toContainerWithIdentifier_.assert_called_once()
+    args, _ = save_req.addContact_toContainerWithIdentifier_.call_args
+    assert args[1] is None  # default container
+    save_req.addMember_toGroup_.assert_not_called()
+    store.executeSaveRequest_error_.assert_called_once()
+
+
+def test_create_contact_sets_all_simple_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, mutable_class, _ = _install_fake_contacts_for_create(monkeypatch)
+    connector = ContactsConnector()
+    connector._run_cn_create_contact(
+        fields={
+            "given_name": "G",
+            "family_name": "F",
+            "middle_name": "M",
+            "name_prefix": "P",
+            "name_suffix": "S",
+            "nickname": "N",
+            "organization": "O",
+            "job_title": "J",
+            "department": "D",
+        },
+        group_identifier=None,
+    )
+    mutable = mutable_class.alloc.return_value.init.return_value
+    mutable.setGivenName_.assert_called_once_with("G")
+    mutable.setFamilyName_.assert_called_once_with("F")
+    mutable.setMiddleName_.assert_called_once_with("M")
+    mutable.setNamePrefix_.assert_called_once_with("P")
+    mutable.setNameSuffix_.assert_called_once_with("S")
+    mutable.setNickname_.assert_called_once_with("N")
+    mutable.setOrganizationName_.assert_called_once_with("O")
+    mutable.setJobTitle_.assert_called_once_with("J")
+    mutable.setDepartmentName_.assert_called_once_with("D")
+
+
+def test_create_contact_skips_setters_for_empty_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, mutable_class, _ = _install_fake_contacts_for_create(monkeypatch)
+    connector = ContactsConnector()
+    connector._run_cn_create_contact(
+        fields={"given_name": "Alice"}, group_identifier=None
+    )
+    mutable = mutable_class.alloc.return_value.init.return_value
+    mutable.setFamilyName_.assert_not_called()
+    mutable.setOrganizationName_.assert_not_called()
+    mutable.setBirthday_.assert_not_called()
+
+
+def test_create_contact_with_phones_emails_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, mutable_class, _ = _install_fake_contacts_for_create(monkeypatch)
+    connector = ContactsConnector()
+    connector._run_cn_create_contact(
+        fields={
+            "given_name": "Alice",
+            "phones": [{"label_raw": "_$!<Mobile>!$_", "value": "+1 555-1212"}],
+            "emails": [{"label_raw": "_$!<Home>!$_", "value": "alice@example.com"}],
+            "urls": [{"label_raw": "", "value": "https://example.com"}],
+        },
+        group_identifier=None,
+    )
+    mutable = mutable_class.alloc.return_value.init.return_value
+    mutable.setPhoneNumbers_.assert_called_once()
+    mutable.setEmailAddresses_.assert_called_once()
+    mutable.setUrlAddresses_.assert_called_once()
+
+
+def test_create_contact_with_postal_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, mutable_class, _ = _install_fake_contacts_for_create(monkeypatch)
+    connector = ContactsConnector()
+    connector._run_cn_create_contact(
+        fields={
+            "given_name": "Alice",
+            "postal_addresses": [
+                {
+                    "label_raw": "_$!<Home>!$_",
+                    "street": "1 Loop", "city": "Cupertino",
+                    "state": "CA", "postal_code": "95014",
+                    "country": "USA", "iso_country_code": "us",
+                }
+            ],
+        },
+        group_identifier=None,
+    )
+    mutable = mutable_class.alloc.return_value.init.return_value
+    mutable.setPostalAddresses_.assert_called_once()
+
+
+def test_create_contact_with_birthday(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, _, mutable_class, _ = _install_fake_contacts_for_create(monkeypatch)
+    connector = ContactsConnector()
+    connector._run_cn_create_contact(
+        fields={
+            "given_name": "Alice",
+            "birthday": {"year": 1990, "month": 5, "day": 15},
+        },
+        group_identifier=None,
+    )
+    mutable = mutable_class.alloc.return_value.init.return_value
+    mutable.setBirthday_.assert_called_once()
+
+
+def test_create_contact_with_group_attaches_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_group = MagicMock(name="CNGroup_instance")
+    _, store, _, save_req = _install_fake_contacts_for_create(
+        monkeypatch, group_results=[fake_group]
+    )
+    connector = ContactsConnector()
+    result = connector._run_cn_create_contact(
+        fields={"given_name": "Alice"}, group_identifier="MCP-Test-id"
+    )
+    assert result  # any identifier
+    save_req.addContact_toContainerWithIdentifier_.assert_called_once()
+    save_req.addMember_toGroup_.assert_called_once()
+    args, _ = save_req.addMember_toGroup_.call_args
+    assert args[1] is fake_group
+    store.executeSaveRequest_error_.assert_called_once()
+
+
+def test_create_contact_raises_not_found_when_group_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, store, _, save_req = _install_fake_contacts_for_create(
+        monkeypatch, group_results=[]
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsNotFoundError):
+        connector._run_cn_create_contact(
+            fields={"given_name": "Alice"}, group_identifier="missing"
+        )
+    save_req.addContact_toContainerWithIdentifier_.assert_not_called()
+    store.executeSaveRequest_error_.assert_not_called()
+
+
+def test_create_contact_raises_when_save_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_save_error = MagicMock(name="NSError(save)")
+    fake_save_error.__str__.return_value = "save boom"
+    _install_fake_contacts_for_create(
+        monkeypatch, save_succeeds=False, fake_save_error=fake_save_error
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_create_contact(
+            fields={"given_name": "Alice"}, group_identifier=None
+        )
+    assert "save boom" in str(exc_info.value)

@@ -8,7 +8,8 @@ from typing import Any
 from fastmcp import FastMCP
 
 from .contacts_connector import ContactsConnector
-from .exceptions import ContactsTimeoutError
+from .exceptions import ContactsNotFoundError, ContactsTimeoutError
+from .security import check_test_mode_safety
 
 logging.basicConfig(
     level=logging.INFO,
@@ -297,6 +298,182 @@ def search_contacts(query: str) -> dict[str, Any]:
         "query": query,
         "limit": _SEARCH_CONTACTS_MAX,
     }
+
+
+def _validate_create_contact_input(
+    fields: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Validate create_contact's parsed input. Returns None if OK, error
+    dict otherwise."""
+    if not (
+        (fields.get("given_name") or "").strip()
+        or (fields.get("family_name") or "").strip()
+        or (fields.get("organization") or "").strip()
+    ):
+        return _validation_error(
+            "At least one of given_name, family_name, or organization "
+            "must be set."
+        )
+
+    for i, p in enumerate(fields.get("phones") or []):
+        if not (p.get("value") or "").strip():
+            return _validation_error(f"phones[{i}].value must be non-empty")
+
+    for i, e in enumerate(fields.get("emails") or []):
+        v = (e.get("value") or "").strip()
+        if not v:
+            return _validation_error(f"emails[{i}].value must be non-empty")
+        if "@" not in v:
+            return _validation_error(f"emails[{i}].value must contain '@'")
+
+    for i, u in enumerate(fields.get("urls") or []):
+        if not (u.get("value") or "").strip():
+            return _validation_error(f"urls[{i}].value must be non-empty")
+
+    for i, a in enumerate(fields.get("postal_addresses") or []):
+        if not any(
+            (a.get(k) or "").strip()
+            for k in ("street", "city", "state", "postal_code", "country")
+        ):
+            return _validation_error(
+                f"postal_addresses[{i}] must set at least one of "
+                f"street/city/state/postal_code/country"
+            )
+
+    bday = fields.get("birthday")
+    if bday is not None:
+        m = bday.get("month")
+        d = bday.get("day")
+        y = bday.get("year")
+        if m is not None and not (1 <= m <= 12):
+            return _validation_error("birthday.month must be 1-12")
+        if d is not None and not (1 <= d <= 31):
+            return _validation_error("birthday.day must be 1-31")
+        if y is not None and y <= 0:
+            return _validation_error("birthday.year must be > 0 if set")
+
+    return None
+
+
+def _validation_error(msg: str) -> dict[str, Any]:
+    return {
+        "success": False,
+        "error": msg,
+        "error_type": "validation_error",
+    }
+
+
+@mcp.tool()
+def create_contact(
+    given_name: str = "",
+    family_name: str = "",
+    middle_name: str = "",
+    name_prefix: str = "",
+    name_suffix: str = "",
+    nickname: str = "",
+    organization: str = "",
+    job_title: str = "",
+    department: str = "",
+    phones: list[dict[str, str]] | None = None,
+    emails: list[dict[str, str]] | None = None,
+    urls: list[dict[str, str]] | None = None,
+    postal_addresses: list[dict[str, str]] | None = None,
+    birthday: dict[str, int] | None = None,
+    group_identifier: str | None = None,
+) -> dict[str, Any]:
+    """Create a new contact in the user's default container.
+
+    Pass any subset of the P1 fields. At least one of ``given_name``,
+    ``family_name``, or ``organization`` must be non-empty. Labeled-value
+    entries (phones, emails, urls, postal_addresses) carry ``label_raw``
+    (an Apple token like ``_$!<Mobile>!$_``, or any custom string) plus
+    their type-specific value field(s).
+
+    In test mode (``CONTACTS_TEST_MODE=true``), ``group_identifier`` must
+    be provided and must match ``CONTACTS_TEST_GROUP``. The new contact
+    is added to that group atomically with creation, so the test
+    harness can clean it up.
+
+    Args:
+        given_name, family_name, middle_name, name_prefix, name_suffix,
+        nickname: Name parts; default "".
+        organization, job_title, department: Org triplet; default "".
+        phones / emails / urls: Lists of ``{label_raw, value}`` dicts.
+        postal_addresses: List of ``{label_raw, street, sub_locality,
+            city, sub_administrative_area, state, postal_code, country,
+            iso_country_code}`` dicts (any subset; at least one address
+            field must be non-empty).
+        birthday: ``{year?, month?, day?}`` (any subset).
+        group_identifier: If set, the new contact is added to this group
+            in the same CNSaveRequest. Required in test mode.
+
+    Returns:
+        On success: ``{"success": True, "identifier": "...",
+        "group_id": "..."}``. ``group_id`` is omitted when
+        ``group_identifier`` was None.
+        On bad input: ``{"success": False, "error_type":
+        "validation_error", "error": ...}``.
+        On TCC denial: same shape as ``list_contacts``.
+        On test-mode safety violation: ``{"success": False,
+        "error_type": "safety_violation", "error": ...}``.
+        On group not found: ``{"success": False, "error_type":
+        "not_found", "error": ...}``.
+        On CN save failure: ``{"success": False, "error_type":
+        "unknown", "error": ...}``.
+    """
+    fields: dict[str, Any] = {
+        "given_name": given_name,
+        "family_name": family_name,
+        "middle_name": middle_name,
+        "name_prefix": name_prefix,
+        "name_suffix": name_suffix,
+        "nickname": nickname,
+        "organization": organization,
+        "job_title": job_title,
+        "department": department,
+        "phones": phones or [],
+        "emails": emails or [],
+        "urls": urls or [],
+        "postal_addresses": postal_addresses or [],
+        "birthday": birthday,
+    }
+
+    validation_err = _validate_create_contact_input(fields)
+    if validation_err is not None:
+        return validation_err
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    safety_err = check_test_mode_safety(
+        "create_contact", group=group_identifier
+    )
+    if safety_err is not None:
+        return safety_err
+
+    try:
+        identifier = connector._run_cn_create_contact(
+            fields=fields, group_identifier=group_identifier
+        )
+    except ContactsNotFoundError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": "not_found",
+        }
+    except Exception as exc:
+        logger.error("create_contact failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"Create failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    response: dict[str, Any] = {"success": True, "identifier": identifier}
+    if group_identifier is not None:
+        response["group_id"] = group_identifier
+    return response
 
 
 def main() -> None:
