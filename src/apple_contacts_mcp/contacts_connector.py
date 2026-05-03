@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import threading
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from .exceptions import (
@@ -164,6 +165,56 @@ class ContactsConnector:
             raise ContactsError(f"CN enumerate failed: {err}")
         return contacts
 
+    def _run_cn_unified_contact(
+        self, identifier: str
+    ) -> dict[str, Any] | None:
+        """Fetch a single contact by identifier with the full P1 key set.
+
+        Returns the serialized dict, or None if no contact matches.
+        """
+        from Contacts import (
+            CNContactBirthdayKey,
+            CNContactDepartmentNameKey,
+            CNContactEmailAddressesKey,
+            CNContactFamilyNameKey,
+            CNContactGivenNameKey,
+            CNContactJobTitleKey,
+            CNContactMiddleNameKey,
+            CNContactNamePrefixKey,
+            CNContactNameSuffixKey,
+            CNContactNicknameKey,
+            CNContactOrganizationNameKey,
+            CNContactPhoneNumbersKey,
+            CNContactPostalAddressesKey,
+            CNContactUrlAddressesKey,
+            CNLabeledValue,
+        )
+
+        keys = [
+            CNContactGivenNameKey,
+            CNContactFamilyNameKey,
+            CNContactMiddleNameKey,
+            CNContactNamePrefixKey,
+            CNContactNameSuffixKey,
+            CNContactNicknameKey,
+            CNContactOrganizationNameKey,
+            CNContactJobTitleKey,
+            CNContactDepartmentNameKey,
+            CNContactPhoneNumbersKey,
+            CNContactEmailAddressesKey,
+            CNContactPostalAddressesKey,
+            CNContactUrlAddressesKey,
+            CNContactBirthdayKey,
+        ]
+
+        store = self._get_store()
+        contact, _err = store.unifiedContactWithIdentifier_keysToFetch_error_(
+            identifier, keys, None
+        )
+        if contact is None:
+            return None
+        return _serialize_contact(contact, CNLabeledValue)
+
     def _run_cn_request_access(self) -> bool:
         """Request TCC access to the Contacts entity. First `_run_cn_*` helper.
 
@@ -202,3 +253,103 @@ class ContactsConnector:
             raise ContactsAuthorizationError(str(result["error"]))
 
         return bool(result["granted"])
+
+
+# ---------------------------------------------------------------------------
+# CNContact serializers (module-private)
+# ---------------------------------------------------------------------------
+
+
+def _serialize_contact(contact: Any, CNLabeledValue: Any) -> dict[str, Any]:
+    return {
+        "id": str(contact.identifier()),
+        "given_name": str(contact.givenName()),
+        "family_name": str(contact.familyName()),
+        "middle_name": str(contact.middleName()),
+        "name_prefix": str(contact.namePrefix()),
+        "name_suffix": str(contact.nameSuffix()),
+        "nickname": str(contact.nickname()),
+        "organization": str(contact.organizationName()),
+        "job_title": str(contact.jobTitle()),
+        "department": str(contact.departmentName()),
+        "phones": _serialize_labeled_values(
+            contact.phoneNumbers(),
+            CNLabeledValue,
+            lambda v: {"value": str(v.stringValue())},
+        ),
+        "emails": _serialize_labeled_values(
+            contact.emailAddresses(),
+            CNLabeledValue,
+            lambda v: {"value": str(v)},
+        ),
+        "urls": _serialize_labeled_values(
+            contact.urlAddresses(),
+            CNLabeledValue,
+            lambda v: {"value": str(v)},
+        ),
+        "postal_addresses": _serialize_labeled_values(
+            contact.postalAddresses(),
+            CNLabeledValue,
+            _serialize_postal_address,
+        ),
+        "birthday": _serialize_birthday(contact.birthday()),
+    }
+
+
+def _serialize_labeled_values(
+    items: Any,
+    CNLabeledValue: Any,
+    value_fn: Callable[[Any], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if items is None:
+        return out
+    for item in items:
+        raw = item.label()
+        if raw is None:
+            label_raw = ""
+            human = ""
+        else:
+            label_raw = str(raw)
+            human = str(CNLabeledValue.localizedStringForLabel_(raw))
+        entry: dict[str, Any] = {"label_raw": label_raw, "label": human}
+        entry.update(value_fn(item.value()))
+        out.append(entry)
+    return out
+
+
+def _serialize_postal_address(addr: Any) -> dict[str, str]:
+    return {
+        "street": str(addr.street()),
+        "sub_locality": str(addr.subLocality()),
+        "city": str(addr.city()),
+        "sub_administrative_area": str(addr.subAdministrativeArea()),
+        "state": str(addr.state()),
+        "postal_code": str(addr.postalCode()),
+        "country": str(addr.country()),
+        "iso_country_code": str(addr.ISOCountryCode()),
+    }
+
+
+def _serialize_birthday(date_components: Any) -> dict[str, int] | None:
+    """Serialize NSDateComponents → {year?, month?, day?} or None.
+
+    Apple uses NSNotFound (≈ NSIntegerMax) for unset components and lets
+    users set a birthday without a year. Filter via 0 < val < 10_000.
+    """
+    if date_components is None:
+        return None
+
+    def _safe(v: Any) -> int | None:
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return None
+        return n if 0 < n < 10_000 else None
+
+    out: dict[str, int] = {}
+    for attr, key in (("year", "year"), ("month", "month"), ("day", "day")):
+        v = _safe(getattr(date_components, attr)())
+        if v is not None:
+            out[key] = v
+    return out or None

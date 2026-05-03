@@ -8,7 +8,11 @@ from unittest.mock import patch
 import pytest
 
 from apple_contacts_mcp.exceptions import ContactsError, ContactsTimeoutError
-from apple_contacts_mcp.server import check_authorization, list_contacts
+from apple_contacts_mcp.server import (
+    check_authorization,
+    get_contact,
+    list_contacts,
+)
 
 
 class TestCheckAuthorization:
@@ -221,3 +225,92 @@ class TestListContactsResponseShape:
             "offset",
             "limit",
         }
+
+
+# ---------------------------------------------------------------------------
+# get_contact
+# ---------------------------------------------------------------------------
+
+
+_FAKE_CONTACT_DICT: dict[str, Any] = {
+    "id": "ABCD",
+    "given_name": "Alice",
+    "family_name": "Adams",
+    "middle_name": "",
+    "name_prefix": "",
+    "name_suffix": "",
+    "nickname": "",
+    "organization": "Acme",
+    "job_title": "",
+    "department": "",
+    "phones": [],
+    "emails": [],
+    "urls": [],
+    "postal_addresses": [],
+    "birthday": None,
+}
+
+
+class TestGetContactValidation:
+    @pytest.mark.parametrize("identifier", ["", "   ", "\t\n"])
+    def test_blank_identifier_returns_validation_error(
+        self, identifier: str
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = get_contact(identifier)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "identifier" in result["error"]
+        mock_connector._run_cn_authorization_status.assert_not_called()
+        mock_connector._run_cn_unified_contact.assert_not_called()
+
+
+class TestGetContactAuthFlow:
+    def test_auth_denied_passthrough_skips_fetch(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = get_contact("ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_cn_unified_contact.assert_not_called()
+
+
+class TestGetContactFound:
+    def test_found_returns_contact_dict(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = _FAKE_CONTACT_DICT
+            result = get_contact("ABCD")
+        assert result == {"success": True, "contact": _FAKE_CONTACT_DICT}
+        mock_connector._run_cn_unified_contact.assert_called_once_with("ABCD")
+
+    def test_response_keys_are_minimal_on_success(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = _FAKE_CONTACT_DICT
+            result = get_contact("ABCD")
+        assert set(result.keys()) == {"success", "contact"}
+
+
+class TestGetContactNotFound:
+    def test_none_from_connector_maps_to_not_found(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = None
+            result = get_contact("ZZZZ")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        assert "ZZZZ" in result["error"]
+
+
+class TestGetContactConnectorRaises:
+    def test_unexpected_exception_returns_unknown_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.side_effect = ContactsError(
+                "boom"
+            )
+            result = get_contact("ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "boom" in result["error"]
