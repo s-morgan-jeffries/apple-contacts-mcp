@@ -21,6 +21,7 @@ connector = ContactsConnector()
 
 
 _LIST_CONTACTS_MAX = 200
+_SEARCH_CONTACTS_MAX = 200
 
 
 _AUTH_REMEDIATION: dict[str, str] = {
@@ -240,6 +241,62 @@ def get_contact(identifier: str) -> dict[str, Any]:
         }
 
     return {"success": True, "contact": contact}
+
+
+@mcp.tool()
+def search_contacts(query: str) -> dict[str, Any]:
+    """Find contacts whose name matches `query` (substring, case-insensitive).
+
+    Matches given/family/organization names via Apple's built-in
+    ``predicateForContactsMatchingName:``. Returns up to 200 results
+    (hard cap). Use ``list_contacts`` for unfiltered iteration;
+    ``get_contact(id)`` for full details on a specific result. Order
+    is not guaranteed.
+
+    Args:
+        query: Substring to match. Must be a non-empty string.
+
+    Returns:
+        On success: ``{"success": True, "contacts": [...], "count": N,
+        "query": query, "limit": 200}``. ``count == limit`` indicates
+        the cap was hit and there may be more matches.
+        On bad input: ``{"success": False, "error_type":
+        "validation_error", "error": ...}``.
+        On TCC denial: same shape as ``list_contacts`` (status,
+        remediation).
+        On unexpected failure: ``{"success": False, "error_type":
+        "unknown", "error": ...}``.
+    """
+    if not query or not query.strip():
+        return {
+            "success": False,
+            "error": "query must be a non-empty string",
+            "error_type": "validation_error",
+        }
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    try:
+        contacts = connector._run_cn_search_contacts(
+            query=query, limit=_SEARCH_CONTACTS_MAX
+        )
+    except Exception as exc:
+        logger.error("search_contacts fetch failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"Search failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {
+        "success": True,
+        "contacts": contacts,
+        "count": len(contacts),
+        "query": query,
+        "limit": _SEARCH_CONTACTS_MAX,
+    }
 
 
 def main() -> None:
