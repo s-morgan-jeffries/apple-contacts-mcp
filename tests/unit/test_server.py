@@ -12,12 +12,15 @@ from apple_contacts_mcp.exceptions import (
     ContactsNotFoundError,
     ContactsTimeoutError,
 )
+from apple_contacts_mcp.security import _get_test_group_identifiers
 from apple_contacts_mcp.server import (
     check_authorization,
     create_contact,
+    delete_contact,
     get_contact,
     list_contacts,
     search_contacts,
+    update_contact,
 )
 
 
@@ -631,3 +634,258 @@ class TestCreateContactSaveFailure:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "save boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# update_contact
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateContactValidation:
+    def test_empty_identifier_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = update_contact(identifier="", given_name="X")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_authorization_status.assert_not_called()
+
+    def test_no_fields_supplied_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = update_contact(identifier="ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "at least one" in result["error"].lower()
+        mock_connector._run_cn_update_contact.assert_not_called()
+
+    def test_email_without_at_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = update_contact(
+                identifier="ABCD",
+                emails=[{"label_raw": "", "value": "no-at-sign"}],
+            )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_update_contact.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "bday",
+        [
+            {"month": 13, "day": 1},
+            {"month": 5, "day": 32},
+            {"year": -1, "month": 5, "day": 15},
+        ],
+    )
+    def test_invalid_birthday_returns_validation_error(
+        self, bday: dict[str, int]
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = update_contact(identifier="ABCD", birthday=bday)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_update_contact.assert_not_called()
+
+
+class TestUpdateContactAuthFlow:
+    def test_auth_denied_passthrough_skips_update(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = update_contact(identifier="ABCD", given_name="Alice")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_cn_update_contact.assert_not_called()
+
+
+class TestUpdateContactTestModeSafety:
+    def test_test_mode_without_group_arg_blocked(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = update_contact(identifier="ABCD", given_name="Alice")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_connector._run_cn_update_contact.assert_not_called()
+
+    def test_test_mode_with_matching_group_proceeds(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_update_contact.return_value = "ABCD"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = update_contact(
+                    identifier="ABCD",
+                    given_name="Alice",
+                    group_identifier="MCP-Test",
+                )
+        assert result == {"success": True, "identifier": "ABCD"}
+
+
+class TestUpdateContactHappyPath:
+    def test_single_field_passes_only_that_key_to_connector(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_update_contact.return_value = "ABCD"
+            result = update_contact(identifier="ABCD", given_name="Alice")
+        assert result == {"success": True, "identifier": "ABCD"}
+        kwargs = mock_connector._run_cn_update_contact.call_args.kwargs
+        assert kwargs["identifier"] == "ABCD"
+        assert kwargs["fields"] == {"given_name": "Alice"}
+
+    def test_empty_string_clears_field_via_presence(self) -> None:
+        """given_name='' must reach the connector (presence semantics)."""
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_update_contact.return_value = "ABCD"
+            update_contact(identifier="ABCD", given_name="")
+        kwargs = mock_connector._run_cn_update_contact.call_args.kwargs
+        assert kwargs["fields"] == {"given_name": ""}
+
+    def test_phones_empty_list_reaches_connector(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_update_contact.return_value = "ABCD"
+            update_contact(identifier="ABCD", phones=[])
+        kwargs = mock_connector._run_cn_update_contact.call_args.kwargs
+        assert kwargs["fields"] == {"phones": []}
+
+    def test_response_keys_are_minimal(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_update_contact.return_value = "ABCD"
+            result = update_contact(identifier="ABCD", given_name="A")
+        assert set(result.keys()) == {"success", "identifier"}
+
+
+class TestUpdateContactErrors:
+    def test_not_found_from_connector(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_update_contact.side_effect = (
+                ContactsNotFoundError("Contact not found: 'BAD'")
+            )
+            result = update_contact(identifier="BAD", given_name="X")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        assert "BAD" in result["error"]
+
+    def test_save_failure_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_update_contact.side_effect = ContactsError(
+                "save boom"
+            )
+            result = update_contact(identifier="ABCD", given_name="X")
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "save boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# delete_contact
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteContactValidation:
+    def test_empty_identifier_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = delete_contact(identifier="")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_authorization_status.assert_not_called()
+
+
+class TestDeleteContactRequiresTestMode:
+    def test_test_mode_off_returns_safety_violation(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = delete_contact(identifier="ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        assert "CONTACTS_TEST_MODE" in result["error"]
+        # Auth was NOT triggered (no TCC prompt for an op we refused).
+        mock_connector._run_cn_authorization_status.assert_not_called()
+        mock_connector._run_cn_delete_contact.assert_not_called()
+
+    def test_test_mode_explicit_false_returns_safety_violation(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "false")
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = delete_contact(identifier="ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_connector._run_cn_authorization_status.assert_not_called()
+
+
+class TestDeleteContactTestGroupGate:
+    def test_test_mode_on_no_group_arg_blocked(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = delete_contact(identifier="ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_connector._run_cn_delete_contact.assert_not_called()
+
+    def test_test_mode_on_with_matching_group_proceeds(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_delete_contact.return_value = "ABCD"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = delete_contact(
+                    identifier="ABCD", group_identifier="MCP-Test"
+                )
+        assert result == {"success": True, "identifier": "ABCD"}
+
+
+class TestDeleteContactErrors:
+    def test_not_found_from_connector(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_delete_contact.side_effect = (
+                ContactsNotFoundError("Contact not found: 'BAD'")
+            )
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = delete_contact(
+                    identifier="BAD", group_identifier="MCP-Test"
+                )
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+
+    def test_save_failure_returns_unknown(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_delete_contact.side_effect = ContactsError(
+                "delete boom"
+            )
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = delete_contact(
+                    identifier="ABCD", group_identifier="MCP-Test"
+                )
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "delete boom" in result["error"]

@@ -218,6 +218,95 @@ class ContactsConnector:
 
         return str(mutable.identifier())
 
+    def _run_cn_update_contact(
+        self, identifier: str, fields: dict[str, Any]
+    ) -> str:
+        """Apply partial field updates to an existing contact and save.
+
+        Fetches the contact with the full P1 key set (so any subset of
+        fields is writable without CNPropertyNotFetchedException), takes
+        a mutable copy, applies only the keys present in ``fields``, and
+        saves via CNSaveRequest.updateContact_.
+
+        Returns the identifier (echoes input) for response symmetry.
+        """
+        from Contacts import (
+            CNContactBirthdayKey,
+            CNContactDepartmentNameKey,
+            CNContactEmailAddressesKey,
+            CNContactFamilyNameKey,
+            CNContactGivenNameKey,
+            CNContactJobTitleKey,
+            CNContactMiddleNameKey,
+            CNContactNamePrefixKey,
+            CNContactNameSuffixKey,
+            CNContactNicknameKey,
+            CNContactOrganizationNameKey,
+            CNContactPhoneNumbersKey,
+            CNContactPostalAddressesKey,
+            CNContactUrlAddressesKey,
+            CNSaveRequest,
+        )
+
+        keys = [
+            CNContactGivenNameKey,
+            CNContactFamilyNameKey,
+            CNContactMiddleNameKey,
+            CNContactNamePrefixKey,
+            CNContactNameSuffixKey,
+            CNContactNicknameKey,
+            CNContactOrganizationNameKey,
+            CNContactJobTitleKey,
+            CNContactDepartmentNameKey,
+            CNContactPhoneNumbersKey,
+            CNContactEmailAddressesKey,
+            CNContactPostalAddressesKey,
+            CNContactUrlAddressesKey,
+            CNContactBirthdayKey,
+        ]
+
+        store = self._get_store()
+        contact, _err = store.unifiedContactWithIdentifier_keysToFetch_error_(
+            identifier, keys, None
+        )
+        if contact is None:
+            raise ContactsNotFoundError(
+                f"Contact not found: {identifier!r}"
+            )
+
+        mutable = contact.mutableCopy()
+        _apply_update_fields(mutable, fields)
+
+        save_req = CNSaveRequest.alloc().init()
+        save_req.updateContact_(mutable)
+        ok, err = store.executeSaveRequest_error_(save_req, None)
+        if not ok:
+            raise ContactsError(f"CN update failed: {err}")
+
+        return identifier
+
+    def _run_cn_delete_contact(self, identifier: str) -> str:
+        """Delete an existing contact. Returns the identifier (echo)."""
+        from Contacts import CNContactIdentifierKey, CNSaveRequest
+
+        store = self._get_store()
+        contact, _err = store.unifiedContactWithIdentifier_keysToFetch_error_(
+            identifier, [CNContactIdentifierKey], None
+        )
+        if contact is None:
+            raise ContactsNotFoundError(
+                f"Contact not found: {identifier!r}"
+            )
+
+        mutable = contact.mutableCopy()
+        save_req = CNSaveRequest.alloc().init()
+        save_req.deleteContact_(mutable)
+        ok, err = store.executeSaveRequest_error_(save_req, None)
+        if not ok:
+            raise ContactsError(f"CN delete failed: {err}")
+
+        return identifier
+
     def _run_cn_search_contacts(
         self, query: str, limit: int
     ) -> list[dict[str, str]]:
@@ -469,6 +558,80 @@ def _build_birthday_components(
     if d := bday.get("day"):
         dc.setDay_(d)
     return dc
+
+
+_UPDATE_SIMPLE_SETTERS: list[tuple[str, str]] = [
+    ("given_name", "setGivenName_"),
+    ("family_name", "setFamilyName_"),
+    ("middle_name", "setMiddleName_"),
+    ("name_prefix", "setNamePrefix_"),
+    ("name_suffix", "setNameSuffix_"),
+    ("nickname", "setNickname_"),
+    ("organization", "setOrganizationName_"),
+    ("job_title", "setJobTitle_"),
+    ("department", "setDepartmentName_"),
+]
+
+
+def _apply_update_fields(mutable: Any, fields: dict[str, Any]) -> None:
+    """Apply only the fields present in ``fields`` to a CNMutableContact.
+
+    Uses **presence** check (``"key" in fields``), not truthy: passing
+    ``given_name=""`` explicitly clears the field; omitting ``given_name``
+    leaves it untouched. Multi-valued fields (phones / emails / urls /
+    postal_addresses) follow REST-PUT semantics — the supplied list
+    replaces the existing list entirely.
+    """
+    from Contacts import CNLabeledValue, CNPhoneNumber
+
+    for key, setter in _UPDATE_SIMPLE_SETTERS:
+        if key in fields:
+            getattr(mutable, setter)(fields[key])
+
+    if "phones" in fields:
+        mutable.setPhoneNumbers_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    p.get("label_raw", ""),
+                    CNPhoneNumber.phoneNumberWithStringValue_(p["value"]),
+                )
+                for p in fields["phones"]
+            ]
+        )
+    if "emails" in fields:
+        mutable.setEmailAddresses_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    e.get("label_raw", ""), e["value"]
+                )
+                for e in fields["emails"]
+            ]
+        )
+    if "urls" in fields:
+        mutable.setUrlAddresses_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    u.get("label_raw", ""), u["value"]
+                )
+                for u in fields["urls"]
+            ]
+        )
+    if "postal_addresses" in fields:
+        mutable.setPostalAddresses_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    a.get("label_raw", ""), _build_mutable_postal_address(a)
+                )
+                for a in fields["postal_addresses"]
+            ]
+        )
+
+    if "birthday" in fields:
+        from Foundation import NSDateComponents
+
+        mutable.setBirthday_(
+            _build_birthday_components(fields["birthday"], NSDateComponents)
+        )
 
 
 # ---------------------------------------------------------------------------

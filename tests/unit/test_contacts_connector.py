@@ -1102,3 +1102,256 @@ def test_create_contact_raises_when_save_fails(
             fields={"given_name": "Alice"}, group_identifier=None
         )
     assert "save boom" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# _run_cn_update_contact + _run_cn_delete_contact
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_contacts_for_modify(
+    monkeypatch: pytest.MonkeyPatch,
+    fetched_contact: MagicMock | None,
+    save_succeeds: bool = True,
+    fake_save_error: Any | None = None,
+) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
+    """Install a fake `Contacts` + `Foundation` set for update/delete tests.
+
+    The store's unifiedContactWithIdentifier_keysToFetch_error_ returns
+    (fetched_contact, None) — pass None to simulate not-found.
+    The fetched_contact (if non-None) needs a .mutableCopy() that returns
+    a fresh MagicMock.
+    Returns (store_instance, mutable_instance, save_request_instance,
+    cn_save_request_class).
+    """
+    fake_contacts = types.ModuleType("Contacts")
+    for k in (
+        "CNContactGivenNameKey",
+        "CNContactFamilyNameKey",
+        "CNContactMiddleNameKey",
+        "CNContactNamePrefixKey",
+        "CNContactNameSuffixKey",
+        "CNContactNicknameKey",
+        "CNContactOrganizationNameKey",
+        "CNContactJobTitleKey",
+        "CNContactDepartmentNameKey",
+        "CNContactPhoneNumbersKey",
+        "CNContactEmailAddressesKey",
+        "CNContactPostalAddressesKey",
+        "CNContactUrlAddressesKey",
+        "CNContactBirthdayKey",
+        "CNContactIdentifierKey",
+    ):
+        setattr(fake_contacts, k, k)
+
+    cn_phone_class = MagicMock(name="CNPhoneNumber")
+    cn_phone_class.phoneNumberWithStringValue_.side_effect = (
+        lambda v: f"PhoneNumber({v})"
+    )
+    fake_contacts.CNPhoneNumber = cn_phone_class  # type: ignore[attr-defined]
+
+    cn_postal_class = MagicMock(name="CNMutablePostalAddress")
+    cn_postal_class.alloc.return_value.init.return_value = MagicMock(
+        name="postal_instance"
+    )
+    fake_contacts.CNMutablePostalAddress = cn_postal_class  # type: ignore[attr-defined]
+
+    cn_labeled_class = MagicMock(name="CNLabeledValue")
+    cn_labeled_class.labeledValueWithLabel_value_.side_effect = (
+        lambda lbl, val: ("labeled", lbl, val)
+    )
+    fake_contacts.CNLabeledValue = cn_labeled_class  # type: ignore[attr-defined]
+
+    cn_save_request_class = MagicMock(name="CNSaveRequest")
+    save_request_instance = MagicMock(name="save_request_instance")
+    cn_save_request_class.alloc.return_value.init.return_value = save_request_instance
+    fake_contacts.CNSaveRequest = cn_save_request_class  # type: ignore[attr-defined]
+
+    cn_store_class = MagicMock(name="CNContactStore")
+    store_instance = MagicMock(name="store_instance")
+    if fetched_contact is None:
+        store_instance.unifiedContactWithIdentifier_keysToFetch_error_.return_value = (
+            None,
+            MagicMock(name="NSError(not_found)"),
+        )
+        mutable_instance = MagicMock(name="mutable_unused")
+    else:
+        store_instance.unifiedContactWithIdentifier_keysToFetch_error_.return_value = (
+            fetched_contact,
+            None,
+        )
+        mutable_instance = MagicMock(name="mutable_instance")
+        fetched_contact.mutableCopy.return_value = mutable_instance
+    store_instance.executeSaveRequest_error_.return_value = (
+        save_succeeds,
+        fake_save_error,
+    )
+    cn_store_class.alloc.return_value.init.return_value = store_instance
+    fake_contacts.CNContactStore = cn_store_class  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "Contacts", fake_contacts)
+
+    fake_foundation = types.ModuleType("Foundation")
+    nsdc_class = MagicMock(name="NSDateComponents")
+    nsdc_class.alloc.return_value.init.return_value = MagicMock(name="nsdc_instance")
+    fake_foundation.NSDateComponents = nsdc_class  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "Foundation", fake_foundation)
+
+    return store_instance, mutable_instance, save_request_instance, cn_save_request_class
+
+
+# ----- _run_cn_update_contact -------------------------------------------------
+
+
+def test_update_contact_raises_not_found_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _, save_req, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=None
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsNotFoundError):
+        connector._run_cn_update_contact("missing", {"given_name": "X"})
+    save_req.updateContact_.assert_not_called()
+    store.executeSaveRequest_error_.assert_not_called()
+
+
+def test_update_contact_only_supplied_setters_fire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="CNContact_fetched")
+    store, mutable, save_req, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched
+    )
+    connector = ContactsConnector()
+    result = connector._run_cn_update_contact(
+        "ABCD", {"given_name": "Alice"}
+    )
+    assert result == "ABCD"
+    mutable.setGivenName_.assert_called_once_with("Alice")
+    mutable.setFamilyName_.assert_not_called()
+    mutable.setOrganizationName_.assert_not_called()
+    mutable.setPhoneNumbers_.assert_not_called()
+    mutable.setBirthday_.assert_not_called()
+    save_req.updateContact_.assert_called_once_with(mutable)
+    store.executeSaveRequest_error_.assert_called_once()
+
+
+def test_update_contact_empty_string_clears_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Presence semantics: passing given_name='' clears, doesn't skip."""
+    fetched = MagicMock(name="CNContact_fetched")
+    _, mutable, _, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched
+    )
+    connector = ContactsConnector()
+    connector._run_cn_update_contact("ABCD", {"given_name": ""})
+    mutable.setGivenName_.assert_called_once_with("")
+
+
+def test_update_contact_phones_empty_list_clears_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="CNContact_fetched")
+    _, mutable, _, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched
+    )
+    connector = ContactsConnector()
+    connector._run_cn_update_contact("ABCD", {"phones": []})
+    mutable.setPhoneNumbers_.assert_called_once_with([])
+
+
+def test_update_contact_phones_replaces_with_supplied_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="CNContact_fetched")
+    _, mutable, _, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched
+    )
+    connector = ContactsConnector()
+    connector._run_cn_update_contact(
+        "ABCD",
+        {"phones": [{"label_raw": "_$!<Mobile>!$_", "value": "+1 555-1212"}]},
+    )
+    mutable.setPhoneNumbers_.assert_called_once()
+    args, _ = mutable.setPhoneNumbers_.call_args
+    assert len(args[0]) == 1
+
+
+def test_update_contact_birthday_replaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="CNContact_fetched")
+    _, mutable, _, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched
+    )
+    connector = ContactsConnector()
+    connector._run_cn_update_contact(
+        "ABCD", {"birthday": {"year": 1991, "month": 6, "day": 1}}
+    )
+    mutable.setBirthday_.assert_called_once()
+
+
+def test_update_contact_save_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="CNContact_fetched")
+    fake_save_error = MagicMock(name="NSError(save)")
+    fake_save_error.__str__.return_value = "save boom"
+    _install_fake_contacts_for_modify(
+        monkeypatch,
+        fetched_contact=fetched,
+        save_succeeds=False,
+        fake_save_error=fake_save_error,
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_update_contact("ABCD", {"given_name": "X"})
+    assert "save boom" in str(exc_info.value)
+
+
+# ----- _run_cn_delete_contact -------------------------------------------------
+
+
+def test_delete_contact_raises_not_found_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _, save_req, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=None
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsNotFoundError):
+        connector._run_cn_delete_contact("missing")
+    save_req.deleteContact_.assert_not_called()
+    store.executeSaveRequest_error_.assert_not_called()
+
+
+def test_delete_contact_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    fetched = MagicMock(name="CNContact_fetched")
+    store, mutable, save_req, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched
+    )
+    connector = ContactsConnector()
+    result = connector._run_cn_delete_contact("ABCD")
+    assert result == "ABCD"
+    save_req.deleteContact_.assert_called_once_with(mutable)
+    store.executeSaveRequest_error_.assert_called_once()
+
+
+def test_delete_contact_save_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="CNContact_fetched")
+    fake_save_error = MagicMock(name="NSError(save)")
+    fake_save_error.__str__.return_value = "delete boom"
+    _install_fake_contacts_for_modify(
+        monkeypatch,
+        fetched_contact=fetched,
+        save_succeeds=False,
+        fake_save_error=fake_save_error,
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_delete_contact("ABCD")
+    assert "delete boom" in str(exc_info.value)

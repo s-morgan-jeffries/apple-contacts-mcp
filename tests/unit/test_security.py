@@ -16,6 +16,7 @@ from apple_contacts_mcp.security import (
     DESTRUCTIVE_OPERATIONS,
     _get_test_group_identifiers,
     check_test_mode_safety,
+    require_test_mode_for,
 )
 
 
@@ -207,3 +208,40 @@ def _subprocess_failure() -> Any:
         raise FileNotFoundError("osascript not available in test env")
 
     return _boom
+
+
+# ---------------------------------------------------------------------------
+# require_test_mode_for
+# ---------------------------------------------------------------------------
+
+
+class TestRequireTestModeFor:
+    def test_env_unset_returns_safety_violation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        result = require_test_mode_for("delete_contact")
+        assert result is not None
+        assert result["error_type"] == "safety_violation"
+        assert "delete_contact" in result["error"]
+        assert "v0.4.0" in result["error"]
+
+    def test_env_false_returns_safety_violation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "false")
+        result = require_test_mode_for("delete_contact")
+        assert result is not None
+        assert result["error_type"] == "safety_violation"
+
+    def test_env_true_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        assert require_test_mode_for("delete_contact") is None
+
+    def test_env_TRUE_case_insensitive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "TRUE")
+        assert require_test_mode_for("delete_contact") is None
