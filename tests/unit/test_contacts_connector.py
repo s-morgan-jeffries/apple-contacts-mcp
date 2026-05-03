@@ -691,3 +691,128 @@ def test_unified_contact_birthday_all_components_zero_returns_none(
     result = connector._run_cn_unified_contact("ABCD")
     assert result is not None
     assert result["birthday"] is None
+
+
+# ---------------------------------------------------------------------------
+# _run_cn_search_contacts
+# ---------------------------------------------------------------------------
+
+
+def _make_basic_contact(
+    cn_id: str, given: str = "G", family: str = "F", org: str = "O"
+) -> MagicMock:
+    """Build a fake CNContact with only the four basic selectors."""
+    c = MagicMock(name=f"CNContact({cn_id})")
+    c.identifier.return_value = cn_id
+    c.givenName.return_value = given
+    c.familyName.return_value = family
+    c.organizationName.return_value = org
+    return c
+
+
+def _install_fake_contacts_for_search(
+    monkeypatch: pytest.MonkeyPatch,
+    results: list[MagicMock] | None,
+    fake_error: object | None = None,
+) -> tuple[MagicMock, MagicMock]:
+    """Install a fake `Contacts` module + a store whose
+    unifiedContactsMatchingPredicate... returns (results, fake_error).
+
+    Returns (CNContact_class_mock, store_instance_mock) for assertions.
+    """
+    fake_module = types.ModuleType("Contacts")
+    fake_module.CNContactIdentifierKey = "id_key"  # type: ignore[attr-defined]
+    fake_module.CNContactGivenNameKey = "given_key"  # type: ignore[attr-defined]
+    fake_module.CNContactFamilyNameKey = "family_key"  # type: ignore[attr-defined]
+    fake_module.CNContactOrganizationNameKey = "org_key"  # type: ignore[attr-defined]
+
+    cn_contact_class = MagicMock(name="CNContact")
+    pred_stub = MagicMock(name="NSPredicate")
+    cn_contact_class.predicateForContactsMatchingName_.return_value = pred_stub
+    fake_module.CNContact = cn_contact_class  # type: ignore[attr-defined]
+
+    cn_store_class = MagicMock(name="CNContactStore")
+    store_instance = MagicMock(name="store_instance")
+    store_instance.unifiedContactsMatchingPredicate_keysToFetch_error_.return_value = (
+        results,
+        fake_error,
+    )
+    cn_store_class.alloc.return_value.init.return_value = store_instance
+    fake_module.CNContactStore = cn_store_class  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "Contacts", fake_module)
+    return cn_contact_class, store_instance
+
+
+def test_search_returns_empty_when_no_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_contacts_for_search(monkeypatch, results=[])
+    connector = ContactsConnector()
+    assert connector._run_cn_search_contacts(query="nobody", limit=200) == []
+
+
+def test_search_returns_dicts_for_each_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = [
+        _make_basic_contact("id-0", "John", "Smith", "Acme"),
+        _make_basic_contact("id-1", "Johnny", "Walker", ""),
+    ]
+    _install_fake_contacts_for_search(monkeypatch, results=fakes)
+    connector = ContactsConnector()
+    result = connector._run_cn_search_contacts(query="john", limit=200)
+    assert result == [
+        {"id": "id-0", "given_name": "John", "family_name": "Smith", "organization": "Acme"},
+        {"id": "id-1", "given_name": "Johnny", "family_name": "Walker", "organization": ""},
+    ]
+
+
+def test_search_caps_results_at_limit_and_skips_serializing_extras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = [_make_basic_contact(f"id-{i}") for i in range(250)]
+    _install_fake_contacts_for_search(monkeypatch, results=fakes)
+    connector = ContactsConnector()
+    result = connector._run_cn_search_contacts(query="x", limit=200)
+    assert len(result) == 200
+    assert result[0]["id"] == "id-0"
+    assert result[-1]["id"] == "id-199"
+    # 201st contact's selectors must never have been touched.
+    assert fakes[200].identifier.call_count == 0
+
+
+def test_search_calls_predicate_with_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cn_contact_class, _ = _install_fake_contacts_for_search(monkeypatch, results=[])
+    connector = ContactsConnector()
+    connector._run_cn_search_contacts(query="alice", limit=200)
+    cn_contact_class.predicateForContactsMatchingName_.assert_called_once_with(
+        "alice"
+    )
+
+
+def test_search_dict_keys_are_exactly_the_four_basic_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_contacts_for_search(
+        monkeypatch, results=[_make_basic_contact("id-0", "A", "B", "C")]
+    )
+    connector = ContactsConnector()
+    [entry] = connector._run_cn_search_contacts(query="a", limit=200)
+    assert set(entry.keys()) == {"id", "given_name", "family_name", "organization"}
+
+
+def test_search_raises_contacts_error_when_results_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_error = MagicMock(name="NSError")
+    fake_error.__str__.return_value = "boom"
+    _install_fake_contacts_for_search(
+        monkeypatch, results=None, fake_error=fake_error
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_search_contacts(query="x", limit=200)
+    assert "boom" in str(exc_info.value)

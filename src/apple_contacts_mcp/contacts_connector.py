@@ -165,6 +165,51 @@ class ContactsConnector:
             raise ContactsError(f"CN enumerate failed: {err}")
         return contacts
 
+    def _run_cn_search_contacts(
+        self, query: str, limit: int
+    ) -> list[dict[str, str]]:
+        """Search contacts by name predicate, returning basic-field dicts.
+
+        Predicate execution is offloaded to the framework — fast even on
+        large address books. We slice to ``limit`` *while serializing*
+        so we don't pay full O(N_matches) for entries we'll throw away.
+        """
+        from Contacts import (
+            CNContact,
+            CNContactFamilyNameKey,
+            CNContactGivenNameKey,
+            CNContactIdentifierKey,
+            CNContactOrganizationNameKey,
+        )
+
+        keys = [
+            CNContactIdentifierKey,
+            CNContactGivenNameKey,
+            CNContactFamilyNameKey,
+            CNContactOrganizationNameKey,
+        ]
+        pred = CNContact.predicateForContactsMatchingName_(query)
+        store = self._get_store()
+        results, err = store.unifiedContactsMatchingPredicate_keysToFetch_error_(
+            pred, keys, None
+        )
+        if results is None:
+            raise ContactsError(f"CN search failed: {err}")
+
+        out: list[dict[str, str]] = []
+        for contact in results:
+            if len(out) >= limit:
+                break
+            out.append(
+                {
+                    "id": str(contact.identifier()),
+                    "given_name": str(contact.givenName()),
+                    "family_name": str(contact.familyName()),
+                    "organization": str(contact.organizationName()),
+                }
+            )
+        return out
+
     def _run_cn_unified_contact(
         self, identifier: str
     ) -> dict[str, Any] | None:
