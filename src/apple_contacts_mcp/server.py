@@ -9,7 +9,7 @@ from fastmcp import FastMCP
 
 from .contacts_connector import ContactsConnector
 from .exceptions import ContactsNotFoundError, ContactsTimeoutError
-from .security import check_test_mode_safety
+from .security import check_test_mode_safety, require_test_mode_for
 
 logging.basicConfig(
     level=logging.INFO,
@@ -474,6 +474,232 @@ def create_contact(
     if group_identifier is not None:
         response["group_id"] = group_identifier
     return response
+
+
+def _validate_update_contact_input(
+    identifier: str, fields: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Validate update_contact's parsed input. Returns None if OK, error
+    dict otherwise."""
+    if not identifier or not identifier.strip():
+        return _validation_error("identifier must be a non-empty string")
+
+    if len(fields) == 0:
+        return _validation_error(
+            "At least one field must be supplied to update."
+        )
+
+    for i, p in enumerate(fields.get("phones") or []):
+        if not (p.get("value") or "").strip():
+            return _validation_error(f"phones[{i}].value must be non-empty")
+
+    for i, e in enumerate(fields.get("emails") or []):
+        v = (e.get("value") or "").strip()
+        if not v:
+            return _validation_error(f"emails[{i}].value must be non-empty")
+        if "@" not in v:
+            return _validation_error(f"emails[{i}].value must contain '@'")
+
+    for i, u in enumerate(fields.get("urls") or []):
+        if not (u.get("value") or "").strip():
+            return _validation_error(f"urls[{i}].value must be non-empty")
+
+    for i, a in enumerate(fields.get("postal_addresses") or []):
+        if not any(
+            (a.get(k) or "").strip()
+            for k in ("street", "city", "state", "postal_code", "country")
+        ):
+            return _validation_error(
+                f"postal_addresses[{i}] must set at least one of "
+                f"street/city/state/postal_code/country"
+            )
+
+    bday = fields.get("birthday")
+    if bday is not None:
+        m = bday.get("month")
+        d = bday.get("day")
+        y = bday.get("year")
+        if m is not None and not (1 <= m <= 12):
+            return _validation_error("birthday.month must be 1-12")
+        if d is not None and not (1 <= d <= 31):
+            return _validation_error("birthday.day must be 1-31")
+        if y is not None and y <= 0:
+            return _validation_error("birthday.year must be > 0 if set")
+
+    return None
+
+
+@mcp.tool()
+def update_contact(
+    identifier: str,
+    given_name: str | None = None,
+    family_name: str | None = None,
+    middle_name: str | None = None,
+    name_prefix: str | None = None,
+    name_suffix: str | None = None,
+    nickname: str | None = None,
+    organization: str | None = None,
+    job_title: str | None = None,
+    department: str | None = None,
+    phones: list[dict[str, str]] | None = None,
+    emails: list[dict[str, str]] | None = None,
+    urls: list[dict[str, str]] | None = None,
+    postal_addresses: list[dict[str, str]] | None = None,
+    birthday: dict[str, int] | None = None,
+    group_identifier: str | None = None,
+) -> dict[str, Any]:
+    """Update an existing contact by identifier with partial-field semantics.
+
+    Every field defaults to ``None`` meaning "don't touch". To explicitly
+    clear a string field, pass ``""``. To replace a multi-valued list
+    (phones / emails / urls / postal_addresses), pass the new list — the
+    existing list is replaced entirely (REST-PUT semantics, not append).
+    Pass ``[]`` to clear all entries of a list. At least one field must
+    be supplied.
+
+    In test mode (``CONTACTS_TEST_MODE=true``), ``group_identifier``
+    must match ``CONTACTS_TEST_GROUP``. The connector does not consult
+    ``group_identifier`` — it's only used for the test-mode safety
+    assertion.
+
+    Args:
+        identifier: The contact's CN identifier.
+        ...all P1 fields (None = don't touch; "" = clear)...
+        group_identifier: Test-mode safety assertion. Required in test
+            mode. Ignored otherwise.
+
+    Returns:
+        On success: ``{"success": True, "identifier": identifier}``.
+        Use ``get_contact(identifier)`` to read back the updated record.
+        On bad input: ``{"success": False, "error_type":
+        "validation_error", ...}``.
+        On TCC denial: same shape as ``list_contacts``.
+        On safety violation: ``{"success": False, "error_type":
+        "safety_violation", ...}``.
+        On contact not found: ``{"success": False, "error_type":
+        "not_found", ...}``.
+        On CN save failure: ``{"success": False, "error_type":
+        "unknown", ...}``.
+    """
+    fields: dict[str, Any] = {}
+    for key, value in (
+        ("given_name", given_name),
+        ("family_name", family_name),
+        ("middle_name", middle_name),
+        ("name_prefix", name_prefix),
+        ("name_suffix", name_suffix),
+        ("nickname", nickname),
+        ("organization", organization),
+        ("job_title", job_title),
+        ("department", department),
+        ("phones", phones),
+        ("emails", emails),
+        ("urls", urls),
+        ("postal_addresses", postal_addresses),
+        ("birthday", birthday),
+    ):
+        if value is not None:
+            fields[key] = value
+
+    validation_err = _validate_update_contact_input(identifier, fields)
+    if validation_err is not None:
+        return validation_err
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    safety_err = check_test_mode_safety(
+        "update_contact", group=group_identifier
+    )
+    if safety_err is not None:
+        return safety_err
+
+    try:
+        connector._run_cn_update_contact(identifier=identifier, fields=fields)
+    except ContactsNotFoundError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": "not_found",
+        }
+    except Exception as exc:
+        logger.error("update_contact failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"Update failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {"success": True, "identifier": identifier}
+
+
+@mcp.tool()
+def delete_contact(
+    identifier: str,
+    group_identifier: str | None = None,
+) -> dict[str, Any]:
+    """Delete an existing contact by identifier.
+
+    **v0.1.0 only allows delete in test mode** — the full destructive
+    UX (with confirmation prompts) ships in v0.4.0 (#24). Outside test
+    mode this returns a safety_violation error.
+
+    In test mode (``CONTACTS_TEST_MODE=true``), ``group_identifier``
+    must match ``CONTACTS_TEST_GROUP`` to ensure the deleted contact
+    is one the test harness created.
+
+    Args:
+        identifier: The contact's CN identifier.
+        group_identifier: Test-mode safety assertion. Required in test
+            mode (no other use).
+
+    Returns:
+        On success: ``{"success": True, "identifier": identifier}``.
+        On bad input: ``{"success": False, "error_type":
+        "validation_error", ...}``.
+        On test mode off: ``{"success": False, "error_type":
+        "safety_violation", ...}``.
+        On TCC denial: same shape as ``list_contacts``.
+        On contact not found: ``{"success": False, "error_type":
+        "not_found", ...}``.
+        On CN save failure: ``{"success": False, "error_type":
+        "unknown", ...}``.
+    """
+    if not identifier or not identifier.strip():
+        return _validation_error("identifier must be a non-empty string")
+
+    require_err = require_test_mode_for("delete_contact")
+    if require_err is not None:
+        return require_err
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    safety_err = check_test_mode_safety(
+        "delete_contact", group=group_identifier
+    )
+    if safety_err is not None:
+        return safety_err
+
+    try:
+        connector._run_cn_delete_contact(identifier=identifier)
+    except ContactsNotFoundError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": "not_found",
+        }
+    except Exception as exc:
+        logger.error("delete_contact failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"Delete failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {"success": True, "identifier": identifier}
 
 
 def main() -> None:
