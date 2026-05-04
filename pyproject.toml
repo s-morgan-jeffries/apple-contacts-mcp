@@ -131,3 +131,20 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "Foundation"
 ignore_missing_imports = true
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = ["**/node_modules", "**/__pycache__", ".venv", "venv"]
+pythonVersion = "3.10"
+pythonPlatform = "Darwin"
+typeCheckingMode = "basic"
+reportMissingImports = true
+reportMissingTypeStubs = false
+# PyObjC populates module attributes (e.g. `Contacts.CNGroup`,
+# `Foundation.NSDateComponents`) dynamically at runtime via
+# `objc.loadBundleVariables`, so they look like missing attributes to a
+# static analyzer. Mypy already silences this via
+# `[[tool.mypy.overrides]]` below; mirror for Pylance/pyright here.
+reportAttributeAccessIssue = "none"
+venvPath = "."
+venv = ".venv"
