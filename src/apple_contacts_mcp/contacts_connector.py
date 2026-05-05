@@ -147,7 +147,18 @@ class ContactsConnector:
                 skipped += 1
                 return
             if len(contacts) >= limit:
-                stop_ptr[0] = True
+                # Apple's `BOOL *stop` arrives via PyObjC as either a
+                # mutable 1-element sequence or None depending on the
+                # selector's metadata — for `enumerateContactsWith...`
+                # it's None in practice. Guard defensively; if we can't
+                # short-circuit we just keep returning early (the
+                # framework still walks the rest, but we don't pay the
+                # serialization cost).
+                if stop_ptr is not None:
+                    try:
+                        stop_ptr[0] = True
+                    except (TypeError, IndexError):
+                        pass
                 return
             contacts.append(
                 {

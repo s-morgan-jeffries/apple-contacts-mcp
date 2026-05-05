@@ -352,6 +352,54 @@ def test_enumerate_stops_after_limit_via_stop_ptr(
     assert fakes[3].identifier.call_count == 0
 
 
+def test_enumerate_handles_none_stop_ptr_without_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real PyObjC passes `BOOL *stop` as None for this selector — the
+    callback must not raise when trying to short-circuit. We just stop
+    serializing and let the framework finish its walk.
+
+    Caught by integration testing (issue #15); regression test added at
+    the unit level so it doesn't recur silently.
+    """
+    fake_module = types.ModuleType("Contacts")
+    fake_module.CNContactIdentifierKey = "id_key"  # type: ignore[attr-defined]
+    fake_module.CNContactGivenNameKey = "given_key"  # type: ignore[attr-defined]
+    fake_module.CNContactFamilyNameKey = "family_key"  # type: ignore[attr-defined]
+    fake_module.CNContactOrganizationNameKey = "org_key"  # type: ignore[attr-defined]
+    fetch_request_class = MagicMock(name="CNContactFetchRequest")
+    fetch_request_class.alloc.return_value.initWithKeysToFetch_.return_value = (
+        MagicMock()
+    )
+    fake_module.CNContactFetchRequest = fetch_request_class  # type: ignore[attr-defined]
+
+    cn_store_class = MagicMock(name="CNContactStore")
+    store_instance = MagicMock(name="store_instance")
+    fakes = [_make_fake_contact(f"id-{i}", "G", "F", "O") for i in range(5)]
+
+    def fake_enumerate(
+        _req: Any, _err: Any, callback: Any
+    ) -> tuple[bool, object | None]:
+        # Pass None to mimic real PyObjC behavior for this selector.
+        for contact in fakes:
+            callback(contact, None)
+        return True, None
+
+    store_instance.enumerateContactsWithFetchRequest_error_usingBlock_.side_effect = (
+        fake_enumerate
+    )
+    cn_store_class.alloc.return_value.init.return_value = store_instance
+    fake_module.CNContactStore = cn_store_class  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "Contacts", fake_module)
+
+    connector = ContactsConnector()
+    # limit=2 means after 2 contacts we want to stop, but stop_ptr is None.
+    # The helper should still return only 2 (early-return in the callback)
+    # and not crash trying to mutate None.
+    result = connector._run_cn_enumerate_contacts(offset=0, limit=2)
+    assert [c["id"] for c in result] == ["id-0", "id-1"]
+
+
 def test_enumerate_skips_offset_then_returns_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
