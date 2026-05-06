@@ -2,7 +2,7 @@
 
 Reference for every MCP tool the apple-contacts-mcp server exposes.
 
-**Version:** v0.0.0 (tracks the package version)
+**Version:** v0.1.0 (tracks the package version)
 **Tools:** 7
 
 The source-of-truth for tool behavior is the docstrings in
