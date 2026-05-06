@@ -1,11 +1,14 @@
 # Apple Contacts MCP Server
 
-**Version:** v0.0.0
+**Version:** v0.1.0
 
-This repo is in **bootstrap phase**.
+v0.1.0 ships the seven core CRUD tools (`check_authorization`, `list_contacts`,
+`get_contact`, `search_contacts`, `create_contact`, `update_contact`,
+`delete_contact`). See [docs/reference/TOOLS.md](../docs/reference/TOOLS.md)
+for the API surface and [CHANGELOG.md](../CHANGELOG.md) for release notes.
 
-- Read `BOOTSTRAP.md` first if this is your first session in this repo.
 - `MCP_PLAYBOOK.md` is the authoritative project-agnostic reference.
+- `BOOTSTRAP.md` documents the initial repo setup (mostly historical now).
 - This file accrues contacts-specific guidance as the project grows.
 
 ## Phase 0 — API decision (2026-04-29)

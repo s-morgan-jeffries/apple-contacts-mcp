@@ -12,7 +12,7 @@ from apple_contacts_mcp.security import sanitize_input
 
 
 def test_version() -> None:
-    assert __version__ == "0.0.0"
+    assert __version__ == "0.1.0"
 
 
 def test_connector_instantiates() -> None:
