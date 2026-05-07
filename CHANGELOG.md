@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `search_contacts` — phone, email, and organization predicate modes alongside the existing name search. Phone matching uses Apple's format-tolerant `predicateForContactsMatchingPhoneNumber:` (with `CNPhoneNumber` wrapping); email uses `predicateForContactsMatchingEmailAddress:`; organization uses a custom `CONTAINS[cd]` `NSPredicate` to mirror name-mode case- and diacritic-insensitive substring behavior (#16).
+
+### Changed
+
+- `search_contacts` signature: `query: str` is replaced by four mutually-exclusive parameters (`name`, `phone`, `email`, `organization`). Exactly one must be set; whitespace-only counts as unset. **Breaking change** vs v0.1.0 (#16).
+- `search_contacts` success response: the `query` key is replaced by flat `search_field` + `search_value` keys. `search_value` echoes the stripped value (#16).
+
 ## [0.1.0] - 2026-05-06
 
 First feature release. Seven CRUD tools backed by `Contacts.framework` via PyObjC, gated by TCC authorization checks and test-mode safety.
