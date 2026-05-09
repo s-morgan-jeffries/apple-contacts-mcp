@@ -8,7 +8,7 @@ from typing import Any, cast
 from fastmcp import FastMCP
 
 from .contacts_connector import ContactsConnector, SearchField
-from .exceptions import ContactsNotFoundError, ContactsTimeoutError
+from .exceptions import ContactsError, ContactsNotFoundError, ContactsTimeoutError
 from .security import check_test_mode_safety, require_test_mode_for
 
 logging.basicConfig(
@@ -836,6 +836,164 @@ def delete_contact(
         }
 
     return {"success": True, "identifier": identifier}
+
+
+@mcp.tool()
+def export_vcard(identifiers: list[str]) -> dict[str, Any]:
+    """Export one or more contacts as a single vCard 3.0 payload.
+
+    Atomic: any single missing identifier aborts the whole call with
+    ``not_found``. The returned vCard text is exactly what Apple's
+    serializer emits — vCard 3.0 verbatim. See
+    ``docs/research/vcard-version-decision.md`` for the rationale and
+    Apple's specific quirks.
+
+    Args:
+        identifiers: A non-empty list of contact CN identifiers (the
+            suffixed ``<UUID>:ABPerson`` form returned by other tools).
+            Single-contact callers pass ``[id]``.
+
+    Returns:
+        On success: ``{"success": True, "vcard": <text>, "count": N,
+        "notes": [<limitations>...]}``. The ``notes`` list calls out
+        the documented limitations (NOTE field omitted; year-less
+        birthdays use Apple's ``X-APPLE-OMIT-YEAR=1604`` hack that
+        corrupts to "1604" for non-Apple consumers).
+        On bad input: ``validation_error``.
+        On TCC denial: ``authorization_denied``.
+        On unknown identifier: ``not_found`` (the message names the
+        offending id).
+        On unexpected failure: ``unknown``.
+    """
+    if not isinstance(identifiers, list) or len(identifiers) == 0:
+        return _validation_error(
+            "identifiers must be a non-empty list of strings"
+        )
+    for i, ident in enumerate(identifiers):
+        if not isinstance(ident, str) or not ident.strip():
+            return _validation_error(
+                f"identifiers[{i}] must be a non-empty string"
+            )
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    try:
+        vcard = connector._run_cn_export_vcard(identifiers)
+    except ContactsNotFoundError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": "not_found",
+        }
+    except Exception as exc:
+        logger.error("export_vcard failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"export_vcard failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {
+        "success": True,
+        "vcard": vcard,
+        "count": len(identifiers),
+        "notes": [
+            "NOTE field is omitted (entitlement-gated). Use read_note() and merge separately if needed.",
+            "Year-less birthdays use Apple's X-APPLE-OMIT-YEAR=1604 hack; non-Apple consumers see 1604 as the literal year.",
+        ],
+    }
+
+
+@mcp.tool()
+def import_vcard(
+    vcard_text: str,
+    group_identifier: str | None = None,
+) -> dict[str, Any]:
+    """Parse a vCard payload and persist as new contacts.
+
+    ``vcard_text`` may contain one or more BEGIN:VCARD blocks. Both
+    vCard 3.0 and 4.0 input are accepted (Apple's parser handles both).
+    Atomic: parse failure, empty input, group-not-found, or save failure
+    aborts the whole call. Test-mode gated like ``create_contact``.
+
+    Args:
+        vcard_text: The vCard text. Non-empty after stripping.
+        group_identifier: Optional. If provided, every imported contact
+            is added to the group atomically. Required in test mode for
+            the safety gate (must match ``CONTACTS_TEST_GROUP``).
+
+    Returns:
+        On success: ``{"success": True, "identifiers": [...],
+        "count": N, "group_id": <group_identifier>}``. Identifiers are
+        returned in input order.
+        On bad input (empty text or malformed vCard): ``validation_error``.
+        On TCC denial: ``authorization_denied``.
+        On test-mode mismatch: ``safety_violation``.
+        On unknown ``group_identifier``: ``not_found``.
+        On CN save failure: ``unknown``.
+    """
+    if not isinstance(vcard_text, str) or not vcard_text.strip():
+        return _validation_error(
+            "vcard_text must be a non-empty string"
+        )
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    safety_err = check_test_mode_safety(
+        "import_vcard", group=group_identifier
+    )
+    if safety_err is not None:
+        return safety_err
+
+    try:
+        identifiers = connector._run_cn_import_vcard(
+            vcard_text, group_identifier
+        )
+    except ContactsNotFoundError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": "not_found",
+        }
+    except ContactsError as exc:
+        # ContactsError covers both parse failures and save failures.
+        # Per the plan, parse failures surface as validation_error
+        # (caller's input was malformed); other ContactsErrors as
+        # unknown.
+        msg = str(exc)
+        is_parse_failure = msg.startswith(
+            "vCard parse failed"
+        ) or msg == "No vCards found in input"
+        if is_parse_failure:
+            return {
+                "success": False,
+                "error": msg,
+                "error_type": "validation_error",
+            }
+        logger.error("import_vcard failed: %s", exc)
+        return {
+            "success": False,
+            "error": msg,
+            "error_type": "unknown",
+        }
+    except Exception as exc:
+        logger.error("import_vcard failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"import_vcard failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {
+        "success": True,
+        "identifiers": identifiers,
+        "count": len(identifiers),
+        "group_id": group_identifier,
+    }
 
 
 @mcp.tool()

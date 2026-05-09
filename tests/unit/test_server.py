@@ -18,8 +18,10 @@ from apple_contacts_mcp.server import (
     check_authorization,
     create_contact,
     delete_contact,
+    export_vcard,
     get_contact,
     get_contacts_in_group,
+    import_vcard,
     list_contacts,
     list_groups,
     read_note,
@@ -1598,3 +1600,250 @@ class TestRemoveContactFromGroupErrors:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "remove-boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# export_vcard
+# ---------------------------------------------------------------------------
+
+
+class TestExportVcardValidation:
+    def test_non_list_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = export_vcard("not-a-list")  # type: ignore[arg-type]
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "non-empty list" in result["error"]
+        mock_connector._run_cn_export_vcard.assert_not_called()
+
+    def test_empty_list_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = export_vcard([])
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_export_vcard.assert_not_called()
+
+    def test_non_string_element_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = export_vcard(["good", 123])  # type: ignore[list-item]
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "[1]" in result["error"]
+        mock_connector._run_cn_export_vcard.assert_not_called()
+
+    def test_blank_string_element_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = export_vcard(["good", "  "])
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_export_vcard.assert_not_called()
+
+
+class TestExportVcardAuthFlow:
+    def test_auth_denied_passthrough(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = export_vcard(["id-1"])
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_cn_export_vcard.assert_not_called()
+
+
+class TestExportVcardHappyPath:
+    def test_success_response_includes_vcard_count_and_notes(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_export_vcard.return_value = "BEGIN:VCARD\n"
+            result = export_vcard(["id-1", "id-2"])
+        assert result["success"] is True
+        assert result["vcard"] == "BEGIN:VCARD\n"
+        assert result["count"] == 2
+        assert isinstance(result["notes"], list)
+        assert len(result["notes"]) == 2
+        assert any("NOTE field" in note for note in result["notes"])
+        assert any(
+            "X-APPLE-OMIT-YEAR" in note or "year-less" in note.lower()
+            for note in result["notes"]
+        )
+        mock_connector._run_cn_export_vcard.assert_called_once_with(
+            ["id-1", "id-2"]
+        )
+
+    def test_response_keys_are_minimal(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_export_vcard.return_value = "x"
+            result = export_vcard(["id-1"])
+        assert set(result.keys()) == {"success", "vcard", "count", "notes"}
+
+
+class TestExportVcardErrors:
+    def test_not_found_dispatches(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_export_vcard.side_effect = (
+                ContactsNotFoundError("Contact not found: 'BAD'")
+            )
+            result = export_vcard(["BAD"])
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        assert "BAD" in result["error"]
+
+    def test_unexpected_exception_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_export_vcard.side_effect = ContactsError(
+                "ser-boom"
+            )
+            result = export_vcard(["id-1"])
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "ser-boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# import_vcard
+# ---------------------------------------------------------------------------
+
+
+class TestImportVcardValidation:
+    @pytest.mark.parametrize("vcard_text", ["", "   ", "\t\n"])
+    def test_blank_text_returns_validation_error(
+        self, vcard_text: str
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = import_vcard(vcard_text)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "vcard_text" in result["error"]
+        mock_connector._run_cn_import_vcard.assert_not_called()
+
+    def test_non_string_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = import_vcard(123)  # type: ignore[arg-type]
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_import_vcard.assert_not_called()
+
+
+class TestImportVcardAuthFlow:
+    def test_auth_denied_passthrough(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = import_vcard("BEGIN:VCARD")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_cn_import_vcard.assert_not_called()
+
+
+class TestImportVcardTestModeSafety:
+    def test_test_mode_without_group_blocked(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = import_vcard("BEGIN:VCARD")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_connector._run_cn_import_vcard.assert_not_called()
+
+    def test_test_mode_with_matching_group_proceeds(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_import_vcard.return_value = ["NEW-1"]
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = import_vcard(
+                    "BEGIN:VCARD", group_identifier="MCP-Test"
+                )
+        assert result == {
+            "success": True,
+            "identifiers": ["NEW-1"],
+            "count": 1,
+            "group_id": "MCP-Test",
+        }
+
+
+class TestImportVcardHappyPath:
+    def test_returns_identifiers_count_and_group(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_import_vcard.return_value = [
+                "NEW-1",
+                "NEW-2",
+            ]
+            result = import_vcard("BEGIN:VCARD x2")
+        assert result == {
+            "success": True,
+            "identifiers": ["NEW-1", "NEW-2"],
+            "count": 2,
+            "group_id": None,
+        }
+        mock_connector._run_cn_import_vcard.assert_called_once_with(
+            "BEGIN:VCARD x2", None
+        )
+
+    def test_response_keys_are_minimal(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_import_vcard.return_value = ["NEW"]
+            result = import_vcard("BEGIN:VCARD")
+        assert set(result.keys()) == {
+            "success",
+            "identifiers",
+            "count",
+            "group_id",
+        }
+
+
+class TestImportVcardErrors:
+    def test_parse_failure_dispatches_validation_error(self) -> None:
+        """Key behavior: malformed vCard input is the caller's fault, not
+        an unknown CN error. Error_type = validation_error."""
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_import_vcard.side_effect = ContactsError(
+                "vCard parse failed: malformed input"
+            )
+            result = import_vcard("not a vcard")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "vCard parse failed" in result["error"]
+
+    def test_empty_parse_dispatches_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_import_vcard.side_effect = ContactsError(
+                "No vCards found in input"
+            )
+            result = import_vcard("BEGIN:WHATEVER")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+
+    def test_group_not_found_dispatches_not_found(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_import_vcard.side_effect = (
+                ContactsNotFoundError("Group not found: 'BAD'")
+            )
+            result = import_vcard("BEGIN:VCARD", group_identifier="BAD")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        assert "BAD" in result["error"]
+
+    def test_save_failure_dispatches_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_import_vcard.side_effect = ContactsError(
+                "CN save failed: disk-full"
+            )
+            result = import_vcard("BEGIN:VCARD")
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "save failed" in result["error"]

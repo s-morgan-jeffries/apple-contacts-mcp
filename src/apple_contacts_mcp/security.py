@@ -38,6 +38,7 @@ DESTRUCTIVE_OPERATIONS: frozenset[str] = frozenset(
         "write_note",
         "add_contact_to_group",
         "remove_contact_from_group",
+        "import_vcard",
     }
 )
 """Operations gated by `check_test_mode_safety`.

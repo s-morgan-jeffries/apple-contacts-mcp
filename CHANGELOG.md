@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `get_contacts_in_group(identifier)` — list contacts whose membership includes the given group; same 4-field shape as `list_contacts`, capped at 200; pre-flights via `_run_cn_fetch_group` so unknown identifiers return `not_found` distinctly from real-but-empty groups (#17).
 - `add_contact_to_group(contact_identifier, group_identifier)` and `remove_contact_from_group(contact_identifier, group_identifier)` — destructive group-membership writes. Add uses `CNSaveRequest.addMember:toGroup:`; **remove uses AppleScript** (`remove p from g` + `save`) because Apple's `CNSaveRequest.removeMember:fromGroup:` silently no-ops despite reporting success — empirically discovered during #18 and locked in by the integration suite. Test-mode gated like `update_contact`; success returns both identifiers (#18).
 - Both group-membership ops added to `DESTRUCTIVE_OPERATIONS`.
+- `export_vcard(identifiers)` — vCard 3.0 export via `CNContactVCardSerialization.dataWithContacts:`. Atomic over the id list (first missing identifier aborts). Response includes a `notes` list calling out the NOTE-field omission and the year-less-BDAY corruption per #23. No transformation of Apple's output — see `docs/research/vcard-version-decision.md` (#20).
+- `import_vcard(vcard_text, group_identifier=None)` — parse vCard 3.0 or 4.0 input via `contactsWithData:` and persist via a single `CNSaveRequest`. Atomic; multi-contact input commits as one unit. Test-mode gated like `create_contact`; success returns the new identifiers in input order. Malformed input dispatches `validation_error` (caller's input was bad), distinct from `unknown` for save failures (#20).
+- `import_vcard` added to `DESTRUCTIVE_OPERATIONS`.
 
 ### Changed
 
