@@ -567,7 +567,7 @@ class TestCreateContactValidation:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
             result = create_contact(
                 given_name="Alice",
-                emails=[{"label_raw": "", "value": "no-at-sign"}],
+                emails=[{"label": "", "value": "no-at-sign"}],
             )
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
@@ -577,7 +577,7 @@ class TestCreateContactValidation:
     def test_phone_with_empty_value_returns_validation_error(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
             result = create_contact(
-                given_name="Alice", phones=[{"label_raw": "", "value": ""}]
+                given_name="Alice", phones=[{"label": "", "value": ""}]
             )
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
@@ -586,7 +586,7 @@ class TestCreateContactValidation:
     def test_url_with_empty_value_returns_validation_error(self) -> None:
         with patch("apple_contacts_mcp.server.connector"):
             result = create_contact(
-                given_name="Alice", urls=[{"label_raw": "", "value": ""}]
+                given_name="Alice", urls=[{"label": "", "value": ""}]
             )
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
@@ -595,7 +595,7 @@ class TestCreateContactValidation:
         with patch("apple_contacts_mcp.server.connector"):
             result = create_contact(
                 given_name="Alice",
-                postal_addresses=[{"label_raw": "_$!<Home>!$_"}],
+                postal_addresses=[{"label": "_$!<Home>!$_"}],
             )
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
@@ -699,12 +699,12 @@ class TestCreateContactHappyPath:
                 given_name="Alice",
                 family_name="Adams",
                 organization="Acme",
-                phones=[{"label_raw": "_$!<Mobile>!$_", "value": "+1 555-1212"}],
-                emails=[{"label_raw": "", "value": "alice@example.com"}],
-                urls=[{"label_raw": "", "value": "https://example.com"}],
+                phones=[{"label": "_$!<Mobile>!$_", "value": "+1 555-1212"}],
+                emails=[{"label": "", "value": "alice@example.com"}],
+                urls=[{"label": "", "value": "https://example.com"}],
                 postal_addresses=[
                     {
-                        "label_raw": "_$!<Home>!$_",
+                        "label": "_$!<Home>!$_",
                         "city": "Cupertino",
                     }
                 ],
@@ -772,7 +772,7 @@ class TestUpdateContactValidation:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
             result = update_contact(
                 identifier="ABCD",
-                emails=[{"label_raw": "", "value": "no-at-sign"}],
+                emails=[{"label": "", "value": "no-at-sign"}],
             )
         assert result["success"] is False
         assert result["error_type"] == "validation_error"

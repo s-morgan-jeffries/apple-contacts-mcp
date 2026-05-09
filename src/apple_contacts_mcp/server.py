@@ -521,9 +521,12 @@ def create_contact(
 
     Pass any subset of the P1 fields. At least one of ``given_name``,
     ``family_name``, or ``organization`` must be non-empty. Labeled-value
-    entries (phones, emails, urls, postal_addresses) carry ``label_raw``
-    (an Apple token like ``_$!<Mobile>!$_``, or any custom string) plus
-    their type-specific value field(s).
+    entries (phones, emails, urls, postal_addresses) carry a ``label``
+    field plus their type-specific value field(s). The ``label`` accepts
+    three forms (case-insensitive): an English human form (``"mobile"``,
+    ``"home fax"``, ``"iPhone"``), Apple's raw token
+    (``"_$!<Mobile>!$_"``), or any custom string (``"Spotify"``).
+    See ``docs/research/label-translation-decision.md``.
 
     In test mode (``CONTACTS_TEST_MODE=true``), ``group_identifier`` must
     be provided and must match ``CONTACTS_TEST_GROUP``. The new contact
@@ -534,8 +537,8 @@ def create_contact(
         given_name, family_name, middle_name, name_prefix, name_suffix,
         nickname: Name parts; default "".
         organization, job_title, department: Org triplet; default "".
-        phones / emails / urls: Lists of ``{label_raw, value}`` dicts.
-        postal_addresses: List of ``{label_raw, street, sub_locality,
+        phones / emails / urls: Lists of ``{label, value}`` dicts.
+        postal_addresses: List of ``{label, street, sub_locality,
             city, sub_administrative_area, state, postal_code, country,
             iso_country_code}`` dicts (any subset; at least one address
             field must be non-empty).

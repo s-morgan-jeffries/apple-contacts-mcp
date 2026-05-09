@@ -20,11 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `export_vcard(identifiers)` — vCard 3.0 export via `CNContactVCardSerialization.dataWithContacts:`. Atomic over the id list (first missing identifier aborts). Response includes a `notes` list calling out the NOTE-field omission and the year-less-BDAY corruption per #23. No transformation of Apple's output — see `docs/research/vcard-version-decision.md` (#20).
 - `import_vcard(vcard_text, group_identifier=None)` — parse vCard 3.0 or 4.0 input via `contactsWithData:` and persist via a single `CNSaveRequest`. Atomic; multi-contact input commits as one unit. Test-mode gated like `create_contact`; success returns the new identifiers in input order. Malformed input dispatches `validation_error` (caller's input was bad), distinct from `unknown` for save failures (#20).
 - `import_vcard` added to `DESTRUCTIVE_OPERATIONS`.
+- `label_to_apple_token()` helper in `utils.py` — translates English human-form labels (`"mobile"`, `"home fax"`, `"iPhone"`) to Apple's raw token form (`_$!<Mobile>!$_`) for built-in labels. Apple tokens and custom strings pass through unchanged. 12-entry English table empirically probed against macOS 26.3.1. Closes gap-analysis open Q4 (#22).
 
 ### Changed
 
 - `search_contacts` signature: `query: str` is replaced by four mutually-exclusive parameters (`name`, `phone`, `email`, `organization`). Exactly one must be set; whitespace-only counts as unset. **Breaking change** vs v0.1.0 (#16).
 - `search_contacts` success response: the `query` key is replaced by flat `search_field` + `search_value` keys. `search_value` echoes the stripped value (#16).
+- `create_contact` and `update_contact` input shape: phones / emails / urls / postal_addresses now take a `label` field instead of `label_raw`. The `label` field accepts human forms (`"mobile"`, `"home fax"`), Apple tokens (`"_$!<Mobile>!$_"`), or custom strings (`"Spotify"`); the helper translates as needed. Read-side response is unchanged — `get_contact` still emits both `label_raw` (token, identity) and `label` (Apple's localized display). **Breaking change** vs v0.1.0 (#22).
 
 ### Documentation
 
