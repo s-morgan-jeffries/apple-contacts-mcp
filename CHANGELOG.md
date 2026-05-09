@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `read_note(identifier)` and `write_note(identifier, note, group_identifier=None)` — first AppleScript-fallback tools. The `note` field is entitlement-gated in `Contacts.framework` so we route through `osascript` against Contacts.app. `write_note(id, note="")` clears the note; the connector also issues `save` so writes persist to disk (#19).
 - `escape_applescript_string()` helper in `utils.py` — backslash-then-quote escape for safe interpolation inside AppleScript double-quoted literals. Used by `write_note` and any future AppleScript callers (#21).
 - `write_note` added to `DESTRUCTIVE_OPERATIONS` (test-mode gated like `update_contact`).
+- `list_groups()` — enumerate all contact groups across all containers; returns `{id, name, container_id}` per entry, capped at 200 (#17).
+- `get_contacts_in_group(identifier)` — list contacts whose membership includes the given group; same 4-field shape as `list_contacts`, capped at 200; pre-flights via `_run_cn_fetch_group` so unknown identifiers return `not_found` distinctly from real-but-empty groups (#17).
 
 ### Changed
 

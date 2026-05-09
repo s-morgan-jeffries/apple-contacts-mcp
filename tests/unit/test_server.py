@@ -18,7 +18,9 @@ from apple_contacts_mcp.server import (
     create_contact,
     delete_contact,
     get_contact,
+    get_contacts_in_group,
     list_contacts,
+    list_groups,
     read_note,
     search_contacts,
     update_contact,
@@ -1185,3 +1187,184 @@ class TestWriteNoteErrors:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# list_groups
+# ---------------------------------------------------------------------------
+
+
+_FAKE_GROUPS = [
+    {"id": "G1", "name": "Family", "container_id": "C1"},
+    {"id": "G2", "name": "Work", "container_id": "C1"},
+]
+
+
+class TestListGroupsAuthFlow:
+    def test_auth_denied_passthrough_skips_list(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = list_groups()
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_cn_list_groups.assert_not_called()
+
+
+class TestListGroupsHappyPath:
+    def test_returns_groups_with_count_and_limit(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_list_groups.return_value = _FAKE_GROUPS
+            result = list_groups()
+        assert result == {
+            "success": True,
+            "groups": _FAKE_GROUPS,
+            "count": 2,
+            "limit": 200,
+        }
+
+    def test_empty_store_returns_empty_list(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_list_groups.return_value = []
+            result = list_groups()
+        assert result["success"] is True
+        assert result["groups"] == []
+        assert result["count"] == 0
+
+    def test_response_keys_are_minimal(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_list_groups.return_value = _FAKE_GROUPS
+            result = list_groups()
+        assert set(result.keys()) == {"success", "groups", "count", "limit"}
+
+
+class TestListGroupsCapDetection:
+    def test_count_equals_limit_when_cap_hit(self) -> None:
+        cap_hit = [
+            {"id": f"G{i}", "name": f"Group {i}", "container_id": "C1"}
+            for i in range(250)
+        ]
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_list_groups.return_value = cap_hit
+            result = list_groups()
+        assert result["count"] == 200
+        assert result["limit"] == 200
+        assert len(result["groups"]) == 200
+
+
+class TestListGroupsErrors:
+    def test_unexpected_exception_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_list_groups.side_effect = ContactsError(
+                "boom"
+            )
+            result = list_groups()
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# get_contacts_in_group
+# ---------------------------------------------------------------------------
+
+
+class TestGetContactsInGroupValidation:
+    @pytest.mark.parametrize("identifier", ["", "   ", "\t"])
+    def test_blank_identifier_returns_validation_error(
+        self, identifier: str
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = get_contacts_in_group(identifier)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_fetch_group.assert_not_called()
+        mock_connector._run_cn_contacts_in_group.assert_not_called()
+
+
+class TestGetContactsInGroupAuthFlow:
+    def test_auth_denied_passthrough_skips_lookup(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = get_contacts_in_group("ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_cn_fetch_group.assert_not_called()
+
+
+class TestGetContactsInGroupNotFound:
+    def test_unknown_group_returns_not_found(self) -> None:
+        """Pre-flight via _run_cn_fetch_group → None ⇒ not_found."""
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_fetch_group.return_value = None
+            result = get_contacts_in_group("BAD-GROUP")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        assert "BAD-GROUP" in result["error"]
+        mock_connector._run_cn_contacts_in_group.assert_not_called()
+
+
+class TestGetContactsInGroupHappyPath:
+    def test_returns_contacts_with_group_identifier_echoed(self) -> None:
+        members = [
+            {"id": "id-0", "given_name": "A", "family_name": "B", "organization": "C"},
+        ]
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_fetch_group.return_value = "GROUP-OBJ"
+            mock_connector._run_cn_contacts_in_group.return_value = members
+            result = get_contacts_in_group("MY-GROUP")
+        assert result == {
+            "success": True,
+            "group_identifier": "MY-GROUP",
+            "contacts": members,
+            "count": 1,
+            "limit": 200,
+        }
+        mock_connector._run_cn_contacts_in_group.assert_called_once_with(
+            "MY-GROUP", 200
+        )
+
+    def test_empty_group_returns_empty_list(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_fetch_group.return_value = "GROUP-OBJ"
+            mock_connector._run_cn_contacts_in_group.return_value = []
+            result = get_contacts_in_group("EMPTY")
+        assert result["success"] is True
+        assert result["count"] == 0
+        assert result["contacts"] == []
+
+
+class TestGetContactsInGroupCapDetection:
+    def test_count_equals_limit_when_cap_hit(self) -> None:
+        cap_hit = [
+            {"id": f"id-{i}", "given_name": "x", "family_name": "y", "organization": ""}
+            for i in range(200)
+        ]
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_fetch_group.return_value = "GROUP-OBJ"
+            mock_connector._run_cn_contacts_in_group.return_value = cap_hit
+            result = get_contacts_in_group("BIG")
+        assert result["count"] == 200
+        assert result["limit"] == 200
+
+
+class TestGetContactsInGroupErrors:
+    def test_unexpected_exception_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_fetch_group.return_value = "GROUP-OBJ"
+            mock_connector._run_cn_contacts_in_group.side_effect = (
+                ContactsError("members-boom")
+            )
+            result = get_contacts_in_group("ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "members-boom" in result["error"]

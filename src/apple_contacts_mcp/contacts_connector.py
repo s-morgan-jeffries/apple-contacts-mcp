@@ -278,6 +278,98 @@ class ContactsConnector:
             return None
         return results[0]
 
+    def _run_cn_list_groups(self) -> list[dict[str, str]]:
+        """Enumerate all groups across all containers.
+
+        Returns ``[{"id": str, "name": str, "container_id": str}, ...]``.
+        Order is not guaranteed (matches Apple's native enumeration).
+        Empty store → empty list.
+
+        Note: this is N+1 — one ``containersMatchingPredicate:`` call per
+        group to resolve ``container_id``, since ``CNGroup`` has no public
+        container accessor. Acceptable because typical users have <20
+        groups; revisit if this becomes a bottleneck.
+        """
+        from Contacts import CNContainer
+
+        store = self._get_store()
+        groups, err = store.groupsMatchingPredicate_error_(None, None)
+        if groups is None:
+            raise ContactsError(f"CN groups fetch failed: {err}")
+
+        out: list[dict[str, str]] = []
+        for g in groups:
+            cpred = CNContainer.predicateForContainerOfGroupWithIdentifier_(
+                g.identifier()
+            )
+            containers, cerr = store.containersMatchingPredicate_error_(
+                cpred, None
+            )
+            if containers is None:
+                raise ContactsError(f"CN container fetch failed: {cerr}")
+            # Defensive: Apple shouldn't return a group without a container,
+            # but the API contract doesn't forbid it — fall back to "".
+            container_id = (
+                str(containers[0].identifier())
+                if len(containers) > 0
+                else ""
+            )
+            out.append(
+                {
+                    "id": str(g.identifier()),
+                    "name": str(g.name()),
+                    "container_id": container_id,
+                }
+            )
+        return out
+
+    def _run_cn_contacts_in_group(
+        self, group_id: str, limit: int
+    ) -> list[dict[str, str]]:
+        """Return up to ``limit`` contacts whose membership includes
+        ``group_id``, as 4-field basic dicts.
+
+        No pre-flight — Apple's predicate returns ``[]`` for unknown
+        ``group_id``s without error. Existence checking is the server-tool
+        layer's job (``get_contacts_in_group`` calls
+        ``_run_cn_fetch_group`` first to dispatch ``not_found``).
+        """
+        from Contacts import (
+            CNContact,
+            CNContactFamilyNameKey,
+            CNContactGivenNameKey,
+            CNContactIdentifierKey,
+            CNContactOrganizationNameKey,
+        )
+
+        keys = [
+            CNContactIdentifierKey,
+            CNContactGivenNameKey,
+            CNContactFamilyNameKey,
+            CNContactOrganizationNameKey,
+        ]
+        pred = CNContact.predicateForContactsInGroupWithIdentifier_(group_id)
+        store = self._get_store()
+        results, err = store.unifiedContactsMatchingPredicate_keysToFetch_error_(
+            pred, keys, None
+        )
+        if results is None:
+            raise ContactsError(f"CN group-members fetch failed: {err}")
+
+        out: list[dict[str, str]] = []
+        for c in results:
+            if len(out) >= limit:
+                break
+            out.append(
+                {
+                    "id": str(c.identifier()),
+                    "given_name": str(c.givenName()),
+                    "family_name": str(c.familyName()),
+                    "organization": str(c.organizationName()),
+                }
+            )
+        return out
+
     def _run_cn_create_contact(
         self, fields: dict[str, Any], group_identifier: str | None
     ) -> str:
