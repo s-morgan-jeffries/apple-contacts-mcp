@@ -1,11 +1,11 @@
 # Apple Contacts MCP Server
 
-**Version:** v0.1.0
+**Version:** v0.2.0
 
-v0.1.0 ships the seven core CRUD tools (`check_authorization`, `list_contacts`,
-`get_contact`, `search_contacts`, `create_contact`, `update_contact`,
-`delete_contact`). See [docs/reference/TOOLS.md](../docs/reference/TOOLS.md)
-for the API surface and [CHANGELOG.md](../CHANGELOG.md) for release notes.
+v0.2.0 extends the v0.1.0 core with field-scoped search, group read/write,
+note read/write (AppleScript fallback), and vCard import/export. See
+[docs/reference/TOOLS.md](../docs/reference/TOOLS.md) for the API surface
+and [CHANGELOG.md](../CHANGELOG.md) for release notes.
 
 - `MCP_PLAYBOOK.md` is the authoritative project-agnostic reference.
 - `BOOTSTRAP.md` documents the initial repo setup (mostly historical now).

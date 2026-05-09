@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-09
+
+Phase 2 release. Eight new tools spanning field-scoped search, group read/write, note read/write (AppleScript fallback), and vCard 3.0 import/export. Two breaking input-shape changes vs v0.1.0 (`search_contacts` predicates, `label` field on labeled values).
+
 ### Added
 
 - `search_contacts` — phone, email, and organization predicate modes alongside the existing name search. Phone matching uses Apple's format-tolerant `predicateForContactsMatchingPhoneNumber:` (with `CNPhoneNumber` wrapping); email uses `predicateForContactsMatchingEmailAddress:`; organization uses a custom `CONTAINS[cd]` `NSPredicate` to mirror name-mode case- and diacritic-insensitive substring behavior (#16).
@@ -28,9 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `search_contacts` success response: the `query` key is replaced by flat `search_field` + `search_value` keys. `search_value` echoes the stripped value (#16).
 - `create_contact` and `update_contact` input shape: phones / emails / urls / postal_addresses now take a `label` field instead of `label_raw`. The `label` field accepts human forms (`"mobile"`, `"home fax"`), Apple tokens (`"_$!<Mobile>!$_"`), or custom strings (`"Spotify"`); the helper translates as needed. Read-side response is unchanged — `get_contact` still emits both `label_raw` (token, identity) and `label` (Apple's localized display). **Breaking change** vs v0.1.0 (#22).
 
+### Security
+
+- Identifier escaping in AppleScript paths (`read_note`, `write_note`, `remove_contact_from_group`). CN-issued identifiers are UUID-shaped and contain no AppleScript metacharacters, so this is a no-op for legitimate input — but applies `escape_applescript_string` defensively at the connector boundary so adversarial input from an MCP caller can't inject AppleScript via the `identifier` parameter. Caught in release-gate code review.
+
 ### Documentation
 
 - vCard version-export decision recorded in [`docs/research/vcard-version-decision.md`](docs/research/vcard-version-decision.md) — emit Apple's vCard 3.0 verbatim, document limitations (NOTE omitted, year-less BDAYs use Apple's `X-APPLE-OMIT-YEAR=1604` hack that corrupts to "1604" for non-Apple consumers). Empirically probed against macOS 26.3.1. Closes gap-analysis open Q3 and unblocks `export_vcard` / `import_vcard` work in #20 (#23).
+- `read_note` tool docstring corrected — it previously claimed bare-UUID input worked, but AppleScript's `id of person` requires the `:ABPerson` suffix.
 
 ## [0.1.0] - 2026-05-06
 
