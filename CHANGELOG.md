@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `search_contacts` signature: `query: str` is replaced by four mutually-exclusive parameters (`name`, `phone`, `email`, `organization`). Exactly one must be set; whitespace-only counts as unset. **Breaking change** vs v0.1.0 (#16).
 - `search_contacts` success response: the `query` key is replaced by flat `search_field` + `search_value` keys. `search_value` echoes the stripped value (#16).
 
+### Documentation
+
+- vCard version-export decision recorded in [`docs/research/vcard-version-decision.md`](docs/research/vcard-version-decision.md) — emit Apple's vCard 3.0 verbatim, document limitations (NOTE omitted, year-less BDAYs use Apple's `X-APPLE-OMIT-YEAR=1604` hack that corrupts to "1604" for non-Apple consumers). Empirically probed against macOS 26.3.1. Closes gap-analysis open Q3 and unblocks `export_vcard` / `import_vcard` work in #20 (#23).
+
 ## [0.1.0] - 2026-05-06
 
 First feature release. Seven CRUD tools backed by `Contacts.framework` via PyObjC, gated by TCC authorization checks and test-mode safety.
