@@ -195,17 +195,25 @@ When the identifier doesn't resolve:
 
 ### search_contacts
 
-Find contacts whose name matches `query` (substring, case-insensitive).
+Find contacts by name, phone, email, or organization (pick one).
 
 ```python
-def search_contacts(query: str) -> dict[str, Any]
+def search_contacts(
+    name: str = "",
+    phone: str = "",
+    email: str = "",
+    organization: str = "",
+) -> dict[str, Any]
 ```
 
-**Parameters:**
+**Parameters:** exactly one must be set (non-empty after stripping); whitespace-only counts as unset.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `query` | str | — | Substring to match. Must be a non-empty string (the empty string would silently return all contacts in CN's predicate; we reject it). |
+| `name` | str | `""` | Substring to match against given/family/organization names. |
+| `phone` | str | `""` | Phone number to match (any format). |
+| `email` | str | `""` | Email address to match. |
+| `organization` | str | `""` | Substring to match against organization name. |
 
 **Returns:**
 
@@ -216,7 +224,8 @@ def search_contacts(query: str) -> dict[str, Any]
     {"id": "ABCD-…", "given_name": "John", "family_name": "Smith", "organization": "Acme"}
   ],
   "count": 28,
-  "query": "john",
+  "search_field": "name",
+  "search_value": "john",
   "limit": 200
 }
 ```
@@ -224,11 +233,16 @@ def search_contacts(query: str) -> dict[str, Any]
 **Error types:** `validation_error`, `authorization_denied`, `unknown`.
 
 **Notes:**
-- Matches given/family/organization names via Apple's built-in `predicateForContactsMatchingName:` — substring, case-insensitive.
+- Setting zero or multiple fields returns `validation_error`. The error message lists the fields involved.
+- `search_value` echoes the **stripped** value the predicate actually saw.
+- Match semantics per field:
+  - `name`: substring + case-insensitive across given/family/organization names (Apple's `predicateForContactsMatchingName:`).
+  - `phone`: format-tolerant via Apple's `predicateForContactsMatchingPhoneNumber:` — punctuation, spacing, and country-code variants normalize, so `(555) 123-4567` and `+15551234567` match the same contact.
+  - `email`: Apple's `predicateForContactsMatchingEmailAddress:`.
+  - `organization`: substring, case- and diacritic-insensitive (custom `NSPredicate` with `CONTAINS[cd]`), since Apple ships no built-in organization predicate. Mirrors name-mode behavior.
 - Hard cap at **200 results**. `count == limit` indicates the cap was hit and there may be more matches; narrow the query.
 - Returns the same 4-field shape as `list_contacts`. Use `get_contact(id)` to fetch full details for a specific result.
 - Order is not guaranteed.
-- Phone / email / organization predicate variants land in v0.2.0 (issue #12 in INITIAL_ISSUES.md).
 
 ---
 

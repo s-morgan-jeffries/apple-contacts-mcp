@@ -13,7 +13,7 @@ import logging
 import subprocess
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from .exceptions import (
     ContactsAppleScriptError,
@@ -27,6 +27,9 @@ if TYPE_CHECKING:
     from Contacts import CNContactStore  # pragma: no cover
 
 logger = logging.getLogger(__name__)
+
+SearchField = Literal["name", "phone", "email", "organization"]
+
 
 _CN_AUTHORIZATION_STATUS: dict[int, str] = {
     0: "notDetermined",
@@ -319,9 +322,22 @@ class ContactsConnector:
         return identifier
 
     def _run_cn_search_contacts(
-        self, query: str, limit: int
+        self, *, field: SearchField, value: str, limit: int
     ) -> list[dict[str, str]]:
-        """Search contacts by name predicate, returning basic-field dicts.
+        """Search contacts by ``field`` predicate, returning basic-field dicts.
+
+        ``field`` selects the predicate:
+
+        - ``"name"``: ``predicateForContactsMatchingName:`` (substring,
+          case-insensitive across given/family/organization names).
+        - ``"phone"``: ``predicateForContactsMatchingPhoneNumber:`` after
+          wrapping ``value`` in a ``CNPhoneNumber``. Apple's matcher is
+          format-tolerant — punctuation and country-code variants normalize.
+        - ``"email"``: ``predicateForContactsMatchingEmailAddress:``.
+        - ``"organization"``: hand-rolled ``NSPredicate`` with
+          ``CONTAINS[cd]`` on ``organizationName`` (case- and
+          diacritic-insensitive substring), to mirror name-mode semantics
+          since Apple ships no built-in organization predicate.
 
         Predicate execution is offloaded to the framework — fast even on
         large address books. We slice to ``limit`` *while serializing*
@@ -329,10 +345,12 @@ class ContactsConnector:
         """
         from Contacts import (
             CNContact,
+            CNContactEmailAddressesKey,
             CNContactFamilyNameKey,
             CNContactGivenNameKey,
             CNContactIdentifierKey,
             CNContactOrganizationNameKey,
+            CNContactPhoneNumbersKey,
         )
 
         keys = [
@@ -341,7 +359,37 @@ class ContactsConnector:
             CNContactFamilyNameKey,
             CNContactOrganizationNameKey,
         ]
-        pred = CNContact.predicateForContactsMatchingName_(query)
+        match field:
+            case "name":
+                pred = CNContact.predicateForContactsMatchingName_(value)
+            case "phone":
+                from Contacts import CNPhoneNumber
+
+                # Apple's phone predicate silently returns zero results if
+                # CNContactPhoneNumbersKey isn't in keysToFetch — the
+                # unification step skips contacts whose matching field
+                # wasn't requested. Empirically verified; not documented.
+                keys.append(CNContactPhoneNumbersKey)
+                pred = CNContact.predicateForContactsMatchingPhoneNumber_(
+                    CNPhoneNumber.phoneNumberWithStringValue_(value)
+                )
+            case "email":
+                # Email predicate currently matches without
+                # CNContactEmailAddressesKey, but include it for symmetry
+                # with phone in case Apple tightens the unification step.
+                keys.append(CNContactEmailAddressesKey)
+                pred = CNContact.predicateForContactsMatchingEmailAddress_(
+                    value
+                )
+            case "organization":
+                from Foundation import NSPredicate
+
+                pred = NSPredicate.predicateWithFormat_(
+                    "organizationName CONTAINS[cd] %@", value
+                )
+            case _:
+                raise ContactsError(f"Unknown search field: {field!r}")
+
         store = self._get_store()
         results, err = store.unifiedContactsMatchingPredicate_keysToFetch_error_(
             pred, keys, None

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from fastmcp import FastMCP
 
-from .contacts_connector import ContactsConnector
+from .contacts_connector import ContactsConnector, SearchField
 from .exceptions import ContactsNotFoundError, ContactsTimeoutError
 from .security import check_test_mode_safety, require_test_mode_for
 
@@ -245,35 +245,69 @@ def get_contact(identifier: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def search_contacts(query: str) -> dict[str, Any]:
-    """Find contacts whose name matches `query` (substring, case-insensitive).
+def search_contacts(
+    name: str = "",
+    phone: str = "",
+    email: str = "",
+    organization: str = "",
+) -> dict[str, Any]:
+    """Find contacts by name, phone, email, or organization (pick one).
 
-    Matches given/family/organization names via Apple's built-in
-    ``predicateForContactsMatchingName:``. Returns up to 200 results
-    (hard cap). Use ``list_contacts`` for unfiltered iteration;
-    ``get_contact(id)`` for full details on a specific result. Order
-    is not guaranteed.
+    Exactly one of the four parameters must be set (non-empty after
+    stripping); whitespace-only values count as unset. Returns up to
+    200 results (hard cap). Use ``list_contacts`` for unfiltered
+    iteration; ``get_contact(id)`` for full details on a result.
+    Order is not guaranteed.
+
+    Match semantics:
+
+    - ``name``: substring + case-insensitive across given/family/
+      organization names (Apple's ``predicateForContactsMatchingName:``).
+    - ``phone``: format-tolerant match via Apple's
+      ``predicateForContactsMatchingPhoneNumber:``. Punctuation,
+      spacing, and country-code variants normalize automatically; pass
+      whatever the user typed.
+    - ``email``: ``predicateForContactsMatchingEmailAddress:``.
+    - ``organization``: substring, case- and diacritic-insensitive
+      (custom ``NSPredicate`` with ``CONTAINS[cd]``), to mirror
+      name-mode behavior since Apple ships no built-in organization
+      predicate.
 
     Args:
-        query: Substring to match. Must be a non-empty string.
+        name: Substring to match against contact names.
+        phone: Phone number to match (any format).
+        email: Email address to match.
+        organization: Substring to match against organization name.
 
     Returns:
         On success: ``{"success": True, "contacts": [...], "count": N,
-        "query": query, "limit": 200}``. ``count == limit`` indicates
-        the cap was hit and there may be more matches.
-        On bad input: ``{"success": False, "error_type":
-        "validation_error", "error": ...}``.
+        "search_field": "<name|phone|email|organization>",
+        "search_value": "<stripped value>", "limit": 200}``.
+        ``count == limit`` indicates the cap was hit and there may be
+        more matches.
+        On bad input (zero or multiple fields set): ``{"success":
+        False, "error_type": "validation_error", "error": ...}``.
         On TCC denial: same shape as ``list_contacts`` (status,
         remediation).
         On unexpected failure: ``{"success": False, "error_type":
         "unknown", "error": ...}``.
     """
-    if not query or not query.strip():
-        return {
-            "success": False,
-            "error": "query must be a non-empty string",
-            "error_type": "validation_error",
-        }
+    candidates = {
+        "name": name,
+        "phone": phone,
+        "email": email,
+        "organization": organization,
+    }
+    provided = {k: v.strip() for k, v in candidates.items() if v.strip()}
+    if len(provided) == 0:
+        return _validation_error(
+            "Exactly one of name, phone, email, organization must be set."
+        )
+    if len(provided) > 1:
+        return _validation_error(
+            f"Exactly one search field allowed; got {sorted(provided)}."
+        )
+    [(field, value)] = provided.items()
 
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
@@ -281,7 +315,9 @@ def search_contacts(query: str) -> dict[str, Any]:
 
     try:
         contacts = connector._run_cn_search_contacts(
-            query=query, limit=_SEARCH_CONTACTS_MAX
+            field=cast(SearchField, field),
+            value=value,
+            limit=_SEARCH_CONTACTS_MAX,
         )
     except Exception as exc:
         logger.error("search_contacts fetch failed: %s", exc)
@@ -295,7 +331,8 @@ def search_contacts(query: str) -> dict[str, Any]:
         "success": True,
         "contacts": contacts,
         "count": len(contacts),
-        "query": query,
+        "search_field": field,
+        "search_value": value,
         "limit": _SEARCH_CONTACTS_MAX,
     }
 

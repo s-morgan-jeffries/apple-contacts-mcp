@@ -337,71 +337,168 @@ _FAKE_SEARCH_HITS = [
 ]
 
 
+_SEARCH_FIELDS = ("name", "phone", "email", "organization")
+_SEARCH_VALUES = {
+    "name": "alice",
+    "phone": "+15551234567",
+    "email": "alice@example.com",
+    "organization": "acme",
+}
+
+
 class TestSearchContactsValidation:
-    @pytest.mark.parametrize("query", ["", "   ", "\t", "\n  \t"])
-    def test_blank_query_returns_validation_error(self, query: str) -> None:
+    def test_no_fields_set_returns_validation_error(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            result = search_contacts(query)
+            result = search_contacts()
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
-        assert "query" in result["error"]
+        assert "name" in result["error"]
+        assert "phone" in result["error"]
+        assert "email" in result["error"]
+        assert "organization" in result["error"]
         mock_connector._run_cn_authorization_status.assert_not_called()
         mock_connector._run_cn_search_contacts.assert_not_called()
 
+    @pytest.mark.parametrize("blank", ["", "   ", "\t", "\n  \t"])
+    def test_only_whitespace_treated_as_unset(self, blank: str) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = search_contacts(name=blank)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_search_contacts.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "pair",
+        [
+            ("name", "phone"),
+            ("name", "email"),
+            ("name", "organization"),
+            ("phone", "email"),
+            ("phone", "organization"),
+            ("email", "organization"),
+        ],
+    )
+    def test_two_fields_set_returns_validation_error(
+        self, pair: tuple[str, str]
+    ) -> None:
+        kwargs = {f: _SEARCH_VALUES[f] for f in pair}
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = search_contacts(**kwargs)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        for f in pair:
+            assert f in result["error"]
+        mock_connector._run_cn_search_contacts.assert_not_called()
+
+    def test_all_four_fields_set_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = search_contacts(**_SEARCH_VALUES)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_search_contacts.assert_not_called()
+
+    def test_whitespace_on_others_does_not_count_as_set(self) -> None:
+        """name='alice' alongside phone='   ' is a single-field call."""
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = (
+                "authorized"
+            )
+            mock_connector._run_cn_search_contacts.return_value = []
+            result = search_contacts(
+                name="alice", phone="   ", email="\t", organization=""
+            )
+        assert result["success"] is True
+        mock_connector._run_cn_search_contacts.assert_called_once_with(
+            field="name", value="alice", limit=200
+        )
+
 
 class TestSearchContactsAuthFlow:
-    def test_auth_denied_passthrough_skips_search(self) -> None:
+    @pytest.mark.parametrize("field", _SEARCH_FIELDS)
+    def test_auth_denied_passthrough_skips_search(self, field: str) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
             mock_connector._run_cn_authorization_status.return_value = "denied"
-            result = search_contacts("john")
+            result = search_contacts(**{field: _SEARCH_VALUES[field]})
         assert result["success"] is False
         assert result["error_type"] == "authorization_denied"
         mock_connector._run_cn_search_contacts.assert_not_called()
 
 
 class TestSearchContactsHappyPath:
-    def test_returns_results_with_query_and_limit_echoed(self) -> None:
+    @pytest.mark.parametrize("field", _SEARCH_FIELDS)
+    def test_returns_results_with_search_field_and_value_echoed(
+        self, field: str
+    ) -> None:
+        value = _SEARCH_VALUES[field]
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_cn_search_contacts.return_value = _FAKE_SEARCH_HITS
-            result = search_contacts("john")
+            mock_connector._run_cn_authorization_status.return_value = (
+                "authorized"
+            )
+            mock_connector._run_cn_search_contacts.return_value = (
+                _FAKE_SEARCH_HITS
+            )
+            result = search_contacts(**{field: value})
         assert result == {
             "success": True,
             "contacts": _FAKE_SEARCH_HITS,
             "count": 3,
-            "query": "john",
+            "search_field": field,
+            "search_value": value,
             "limit": 200,
         }
 
     def test_response_keys_are_minimal_on_success(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_cn_search_contacts.return_value = _FAKE_SEARCH_HITS
-            result = search_contacts("john")
+            mock_connector._run_cn_authorization_status.return_value = (
+                "authorized"
+            )
+            mock_connector._run_cn_search_contacts.return_value = (
+                _FAKE_SEARCH_HITS
+            )
+            result = search_contacts(name="john")
         assert set(result.keys()) == {
             "success",
             "contacts",
             "count",
-            "query",
+            "search_field",
+            "search_value",
             "limit",
         }
 
     def test_no_matches_returns_empty_list(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_authorization_status.return_value = (
+                "authorized"
+            )
             mock_connector._run_cn_search_contacts.return_value = []
-            result = search_contacts("zzz-no-match")
+            result = search_contacts(name="zzz-no-match")
         assert result["success"] is True
         assert result["count"] == 0
         assert result["contacts"] == []
 
-    def test_connector_called_with_query_and_cap(self) -> None:
+    @pytest.mark.parametrize("field", _SEARCH_FIELDS)
+    def test_connector_called_with_field_value_and_cap(self, field: str) -> None:
+        value = _SEARCH_VALUES[field]
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_authorization_status.return_value = (
+                "authorized"
+            )
             mock_connector._run_cn_search_contacts.return_value = []
-            search_contacts("alice")
+            search_contacts(**{field: value})
         mock_connector._run_cn_search_contacts.assert_called_once_with(
-            query="alice", limit=200
+            field=field, value=value, limit=200
+        )
+
+    def test_search_value_is_stripped(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = (
+                "authorized"
+            )
+            mock_connector._run_cn_search_contacts.return_value = []
+            result = search_contacts(name="  alice  ")
+        assert result["search_value"] == "alice"
+        mock_connector._run_cn_search_contacts.assert_called_once_with(
+            field="name", value="alice", limit=200
         )
 
 
@@ -412,9 +509,11 @@ class TestSearchContactsCapDetection:
             for i in range(200)
         ]
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_authorization_status.return_value = (
+                "authorized"
+            )
             mock_connector._run_cn_search_contacts.return_value = cap_hit
-            result = search_contacts("j")
+            result = search_contacts(name="j")
         assert result["count"] == 200
         assert result["limit"] == 200
         assert result["count"] == result["limit"]
@@ -423,9 +522,13 @@ class TestSearchContactsCapDetection:
 class TestSearchContactsConnectorRaises:
     def test_unexpected_exception_returns_unknown_error(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_cn_search_contacts.side_effect = ContactsError("boom")
-            result = search_contacts("alice")
+            mock_connector._run_cn_authorization_status.return_value = (
+                "authorized"
+            )
+            mock_connector._run_cn_search_contacts.side_effect = ContactsError(
+                "boom"
+            )
+            result = search_contacts(name="alice")
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "boom" in result["error"]

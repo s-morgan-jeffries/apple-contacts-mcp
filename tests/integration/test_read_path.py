@@ -103,7 +103,7 @@ def test_search_finds_contact_by_unique_name(
     )
     try:
         results = real_connector._run_cn_search_contacts(
-            query=unique_token, limit=10
+            field="name", value=unique_token, limit=10
         )
         ids = {entry["id"] for entry in results}
         assert identifier in ids
@@ -116,7 +116,88 @@ def test_search_no_match_returns_empty(
 ) -> None:
     """A query guaranteed to miss returns an empty list."""
     impossible = f"NoSuchPerson-{uuid.uuid4().hex}"
-    assert real_connector._run_cn_search_contacts(query=impossible, limit=10) == []
+    assert (
+        real_connector._run_cn_search_contacts(
+            field="name", value=impossible, limit=10
+        )
+        == []
+    )
+
+
+def test_search_finds_contact_by_unique_phone(
+    real_connector: ContactsConnector, test_group: str
+) -> None:
+    """A contact created with a unique phone number is findable via Apple's
+    phone predicate, which normalizes punctuation and country codes."""
+    # Valid US E.164: +1 + 10-digit subscriber. The 555 area code with a
+    # 7-digit random suffix gives ~10M possibilities — effectively unique
+    # against any real address book and won't trip Apple's length check.
+    unique_phone = f"+1555{uuid.uuid4().int % 10**7:07d}"
+    identifier = real_connector._run_cn_create_contact(
+        fields={
+            "given_name": "PhoneSearch",
+            "family_name": "Fixture",
+            "phones": [{"label_raw": "_$!<Mobile>!$_", "value": unique_phone}],
+        },
+        group_identifier=test_group,
+    )
+    try:
+        results = real_connector._run_cn_search_contacts(
+            field="phone", value=unique_phone, limit=10
+        )
+        ids = {entry["id"] for entry in results}
+        assert identifier in ids
+    finally:
+        real_connector._run_cn_delete_contact(identifier)
+
+
+def test_search_finds_contact_by_unique_email(
+    real_connector: ContactsConnector, test_group: str
+) -> None:
+    """A contact created with a unique email is findable via the email
+    predicate. Uses the .invalid TLD so the address can never collide."""
+    unique_email = f"integ-{uuid.uuid4().hex}@mcp-test.invalid"
+    identifier = real_connector._run_cn_create_contact(
+        fields={
+            "given_name": "EmailSearch",
+            "family_name": "Fixture",
+            "emails": [{"label_raw": "_$!<Work>!$_", "value": unique_email}],
+        },
+        group_identifier=test_group,
+    )
+    try:
+        results = real_connector._run_cn_search_contacts(
+            field="email", value=unique_email, limit=10
+        )
+        ids = {entry["id"] for entry in results}
+        assert identifier in ids
+    finally:
+        real_connector._run_cn_delete_contact(identifier)
+
+
+def test_search_finds_contact_by_unique_organization(
+    real_connector: ContactsConnector, test_group: str
+) -> None:
+    """A contact created with a unique organization name is findable via
+    the custom CONTAINS[cd] NSPredicate, exercising the org-mode path that
+    has no built-in Apple predicate."""
+    unique_org = f"MCP-Test-{uuid.uuid4().hex[:12]}"
+    identifier = real_connector._run_cn_create_contact(
+        fields={
+            "given_name": "OrgSearch",
+            "family_name": "Fixture",
+            "organization": unique_org,
+        },
+        group_identifier=test_group,
+    )
+    try:
+        results = real_connector._run_cn_search_contacts(
+            field="organization", value=unique_org, limit=10
+        )
+        ids = {entry["id"] for entry in results}
+        assert identifier in ids
+    finally:
+        real_connector._run_cn_delete_contact(identifier)
 
 
 # ---------------------------------------------------------------------------
