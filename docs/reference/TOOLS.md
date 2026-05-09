@@ -3,7 +3,7 @@
 Reference for every MCP tool the apple-contacts-mcp server exposes.
 
 **Version:** v0.1.0 (tracks the package version)
-**Tools:** 7
+**Tools:** 9
 
 The source-of-truth for tool behavior is the docstrings in
 [src/apple_contacts_mcp/server.py](../../src/apple_contacts_mcp/server.py)
@@ -403,6 +403,78 @@ def delete_contact(
 - **v0.1.0 only allows delete in test mode.** Outside `CONTACTS_TEST_MODE=true` this returns `error_type: "safety_violation"` — the full destructive UX (with confirmation prompts) ships in v0.4.0 (#24).
 - The `require_test_mode_for` gate fires **before** the auth check, so users outside test mode never see a TCC prompt for a call that's about to be refused.
 - In test mode, the existing test-group gate also enforces that `group_identifier` matches `CONTACTS_TEST_GROUP`.
+
+---
+
+## Phase 2 Tools (v0.2.0)
+
+### read_note
+
+Read a contact's note via AppleScript.
+
+```python
+def read_note(identifier: str) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `identifier` | str | — | Full CN identifier (e.g. `ABCD-1234-…:ABPerson`). Must be the suffixed form returned by other tools — bare UUIDs do not match. |
+
+**Returns:**
+
+```jsonc
+{
+  "success": true,
+  "identifier": "ABCD-1234-…:ABPerson",
+  "note": "free-form text the user wrote\non multiple lines"
+}
+```
+
+`note == ""` indicates the contact exists but has no note set.
+
+**Error types:** `validation_error`, `authorization_denied`, `not_found`, `unknown`.
+
+**Notes:**
+- **Backed by AppleScript via `osascript`, not Contacts.framework.** The `note` field requires the `com.apple.developer.contacts.notes` entitlement that Apple grants only to App Store apps; we're unbundled, so we route through Contacts.app's AppleScript scripting bridge instead.
+- Pass the identifier verbatim. AppleScript's `id of person` includes the `:ABPerson` suffix — stripping it produces an `Invalid index` error that this tool maps to `not_found`.
+- TCC: gated by `_require_contacts_authorization()` (Contacts privacy permission). On macOS, AppleScript→Contacts.app additionally needs Automation permission, which the OS prompts for on the first call.
+
+---
+
+### write_note
+
+Write a contact's note via AppleScript. `note=""` clears the note.
+
+```python
+def write_note(
+    identifier: str,
+    note: str,
+    group_identifier: str | None = None,
+) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `identifier` | str | — | Full CN identifier (must include `:ABPerson` suffix; see `read_note`). |
+| `note` | str | — | New note text. Empty string clears the note. |
+| `group_identifier` | str \| None | None | Required in test mode for the safety gate; ignored otherwise. |
+
+**Returns:**
+
+```jsonc
+{"success": true, "identifier": "ABCD-1234-…:ABPerson"}
+```
+
+**Error types:** `validation_error`, `safety_violation`, `authorization_denied`, `not_found`, `unknown`.
+
+**Notes:**
+- **Destructive: replaces the note in full** (no append/diff semantics). Use `read_note` first if you need to preserve existing content.
+- Same AppleScript-routing caveats as `read_note`. The connector also issues a `save` after the write — without it, edits sit only in Contacts.app's in-memory state.
+- Test-mode gate is the same shape as `update_contact` (`check_test_mode_safety`, *not* `require_test_mode_for`): outside test mode the call runs freely; in test mode the contact must belong to `CONTACTS_TEST_GROUP`.
 
 ---
 

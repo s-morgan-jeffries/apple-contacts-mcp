@@ -68,8 +68,14 @@ def integration_env() -> Iterator[None]:
 
 @pytest.fixture(scope="session")
 def real_connector() -> ContactsConnector:
-    """Real connector. Skips the session if TCC is unavailable."""
-    c = ContactsConnector(timeout=15.0)
+    """Real connector. Skips the session if TCC is unavailable.
+
+    Timeout is generous (30s) because the first osascript→Contacts.app call
+    pays a cold-start cost: launching Contacts.app, the Automation TCC check,
+    and the initial scripting bridge handshake can take 10–20s. Subsequent
+    calls return in <200ms.
+    """
+    c = ContactsConnector(timeout=30.0)
     status = c._run_cn_authorization_status()
     if status in ("denied", "restricted"):
         pytest.skip(
@@ -83,6 +89,13 @@ def real_connector() -> ContactsConnector:
             pytest.skip(f"requestAccess failed: {exc}")
         if not granted:
             pytest.skip("User did not grant Contacts access.")
+    # Warm up Contacts.app so AppleScript-touching tests don't pay cold-start.
+    try:
+        c._run_applescript(
+            'tell application "Contacts" to count of every person'
+        )
+    except Exception as exc:
+        logger.warning("Contacts.app warm-up failed: %s", exc)
     return c
 
 

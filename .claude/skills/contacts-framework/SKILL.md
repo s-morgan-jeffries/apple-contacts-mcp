@@ -170,31 +170,33 @@ Two specific holes in the framework that AppleScript fills:
 - Accessing `contact.note()` raises `CNPropertyNotFetchedException`
 - vCard exports via `CNContactVCardSerialization` strip the NOTE field
 
-AppleScript reads/writes notes without entitlement:
+AppleScript reads/writes notes without entitlement. Implemented in
+[`contacts_connector.py`](../../../src/apple_contacts_mcp/contacts_connector.py)
+as `_run_applescript_read_note(identifier)` and `_run_applescript_write_note(identifier, note)`,
+exposed as the `read_note` and `write_note` MCP tools (v0.2.0, #19).
 
-```python
-import subprocess
+**Identifier format** — empirically verified during #19: AppleScript's
+`id of person` returns the **full `<UUID>:ABPerson` form**, identical to CN's
+`unifiedContact.identifier`. **Do not strip the `:ABPerson` suffix.** Bare
+UUIDs produce `"Invalid index. (-1719)"` from `whose id is "..."` lookups.
+The connector's `_is_not_found_error` regex maps both `Can't get` (curly
+apostrophe — what AppleScript actually emits) and `Invalid index` to
+`ContactsNotFoundError`.
 
-def read_note(contact_uuid: str) -> str:
-    script = f'''
-    tell application "Contacts"
-      try
-        set p to first person whose id is "{contact_uuid}"
-        if note of p is missing value then return ""
-        return note of p
-      on error
-        return ""
-      end try
-    end tell
-    '''
-    result = subprocess.run(
-        ["osascript", "-e", script],
-        capture_output=True, text=True, timeout=10,
-    )
-    return result.stdout.rstrip("\n")
-```
+**Persistence** — `_run_applescript_write_note` issues a trailing `save`
+inside the `tell application "Contacts"` block. Without it, edits sit in
+Contacts.app's in-memory state and don't reach disk; this is locked in by
+`test_save_command_persists_across_subprocesses` in `tests/integration/test_note_path.py`.
 
-`{contact_uuid}` is alphanumeric+hyphen so safe to interpolate; any other AppleScript-bound string MUST go through `escape_applescript_string()` (utils.py).
+**Cold-start cost** — the first `osascript`→Contacts.app call in a process
+pays a 10–20s cold-start penalty (Contacts.app launch + Automation TCC + scripting
+bridge handshake). The integration fixture warms up Contacts.app once at
+session start; production callers should expect occasional first-call latency.
+
+**Escaping** — only `{identifier}` is safe to interpolate raw. Every other
+AppleScript-bound string MUST go through
+[`escape_applescript_string()`](../../../src/apple_contacts_mcp/utils.py)
+(backslash, then double-quote — order matters).
 
 ### 2. Modification / creation timestamps
 

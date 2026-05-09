@@ -739,6 +739,112 @@ def delete_contact(
     return {"success": True, "identifier": identifier}
 
 
+@mcp.tool()
+def read_note(identifier: str) -> dict[str, Any]:
+    """Read a contact's note via AppleScript.
+
+    The ``note`` field is entitlement-gated in ``Contacts.framework``
+    (only App Store apps with the ``com.apple.developer.contacts.notes``
+    entitlement can read it through the framework). We're unbundled, so
+    this tool routes through ``osascript`` against Contacts.app.
+
+    Args:
+        identifier: The contact's CN identifier (e.g.
+            ``"BD0B...:ABPerson"`` or just the bare UUID).
+
+    Returns:
+        On success: ``{"success": True, "identifier": ..., "note": ...}``.
+        ``note == ""`` indicates the contact has no note set.
+        On bad input: ``{"success": False, "error_type":
+        "validation_error", ...}``.
+        On TCC denial: ``authorization_denied``.
+        On unknown identifier: ``not_found``.
+        On unexpected failure: ``unknown``.
+    """
+    if not identifier or not identifier.strip():
+        return _validation_error("identifier must be a non-empty string")
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    try:
+        note = connector._run_applescript_read_note(identifier)
+    except ContactsNotFoundError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": "not_found",
+        }
+    except Exception as exc:
+        logger.error("read_note failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"read_note failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {"success": True, "identifier": identifier, "note": note}
+
+
+@mcp.tool()
+def write_note(
+    identifier: str,
+    note: str,
+    group_identifier: str | None = None,
+) -> dict[str, Any]:
+    """Write a contact's note via AppleScript. ``note=""`` clears the note.
+
+    Destructive: overwrites any existing note in full (no append/diff
+    semantics). Test-mode gated like ``update_contact`` — when
+    ``CONTACTS_TEST_MODE=true``, the contact must belong to
+    ``CONTACTS_TEST_GROUP`` (caller asserts this via the
+    ``group_identifier`` argument).
+
+    Args:
+        identifier: The contact's CN identifier.
+        note: The new note text. Empty string clears the note.
+        group_identifier: Optional group name or CN identifier — required
+            in test mode for the safety gate.
+
+    Returns:
+        On success: ``{"success": True, "identifier": ...}``.
+        On bad input: ``validation_error``.
+        On TCC denial: ``authorization_denied``.
+        On test-mode mismatch: ``safety_violation``.
+        On unknown identifier: ``not_found``.
+        On unexpected failure: ``unknown``.
+    """
+    if not identifier or not identifier.strip():
+        return _validation_error("identifier must be a non-empty string")
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    safety_err = check_test_mode_safety("write_note", group=group_identifier)
+    if safety_err is not None:
+        return safety_err
+
+    try:
+        connector._run_applescript_write_note(identifier, note)
+    except ContactsNotFoundError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": "not_found",
+        }
+    except Exception as exc:
+        logger.error("write_note failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"write_note failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {"success": True, "identifier": identifier}
+
+
 def main() -> None:
     """Start the MCP server."""
     mcp.run()

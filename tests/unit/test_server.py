@@ -19,8 +19,10 @@ from apple_contacts_mcp.server import (
     delete_contact,
     get_contact,
     list_contacts,
+    read_note,
     search_contacts,
     update_contact,
+    write_note,
 )
 
 
@@ -992,3 +994,194 @@ class TestDeleteContactErrors:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "delete boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# read_note
+# ---------------------------------------------------------------------------
+
+
+class TestReadNoteValidation:
+    @pytest.mark.parametrize("identifier", ["", "   ", "\t"])
+    def test_blank_identifier_returns_validation_error(
+        self, identifier: str
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = read_note(identifier)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_applescript_read_note.assert_not_called()
+
+
+class TestReadNoteAuthFlow:
+    def test_auth_denied_passthrough_skips_read(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = read_note("ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_applescript_read_note.assert_not_called()
+
+
+class TestReadNoteHappyPath:
+    def test_returns_note_text_with_identifier_echoed(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_read_note.return_value = "hello world"
+            result = read_note("ABCD-1234:ABPerson")
+        assert result == {
+            "success": True,
+            "identifier": "ABCD-1234:ABPerson",
+            "note": "hello world",
+        }
+        mock_connector._run_applescript_read_note.assert_called_once_with(
+            "ABCD-1234:ABPerson"
+        )
+
+    def test_empty_note_round_trips(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_read_note.return_value = ""
+            result = read_note("ABCD")
+        assert result == {"success": True, "identifier": "ABCD", "note": ""}
+
+    def test_response_keys_are_minimal(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_read_note.return_value = "x"
+            result = read_note("ABCD")
+        assert set(result.keys()) == {"success", "identifier", "note"}
+
+
+class TestReadNoteErrors:
+    def test_not_found_from_connector(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_read_note.side_effect = (
+                ContactsNotFoundError("Contact not found: 'BAD'")
+            )
+            result = read_note("BAD")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        assert "BAD" in result["error"]
+
+    def test_unexpected_exception_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_read_note.side_effect = ContactsError(
+                "boom"
+            )
+            result = read_note("ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# write_note
+# ---------------------------------------------------------------------------
+
+
+class TestWriteNoteValidation:
+    @pytest.mark.parametrize("identifier", ["", "   ", "\t"])
+    def test_blank_identifier_returns_validation_error(
+        self, identifier: str
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = write_note(identifier, "x")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_applescript_write_note.assert_not_called()
+
+
+class TestWriteNoteAuthFlow:
+    def test_auth_denied_passthrough_skips_write(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = write_note("ABCD", "x")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_applescript_write_note.assert_not_called()
+
+
+class TestWriteNoteTestModeSafety:
+    def test_test_mode_without_group_arg_blocked(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = write_note("ABCD", "x")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_connector._run_applescript_write_note.assert_not_called()
+
+    def test_test_mode_with_matching_group_proceeds(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_write_note.return_value = None
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = write_note(
+                    "ABCD", "hello", group_identifier="MCP-Test"
+                )
+        assert result == {"success": True, "identifier": "ABCD"}
+
+
+class TestWriteNoteHappyPath:
+    def test_passes_identifier_and_note_to_connector(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_write_note.return_value = None
+            result = write_note("ABCD", "hello world")
+        assert result == {"success": True, "identifier": "ABCD"}
+        mock_connector._run_applescript_write_note.assert_called_once_with(
+            "ABCD", "hello world"
+        )
+
+    def test_empty_note_clears_via_connector(self) -> None:
+        """note='' is the legitimate clear value — must reach the connector."""
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_write_note.return_value = None
+            result = write_note("ABCD", "")
+        assert result == {"success": True, "identifier": "ABCD"}
+        mock_connector._run_applescript_write_note.assert_called_once_with(
+            "ABCD", ""
+        )
+
+    def test_response_keys_are_minimal(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_write_note.return_value = None
+            result = write_note("ABCD", "x")
+        assert set(result.keys()) == {"success", "identifier"}
+
+
+class TestWriteNoteErrors:
+    def test_not_found_from_connector(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_write_note.side_effect = (
+                ContactsNotFoundError("Contact not found: 'BAD'")
+            )
+            result = write_note("BAD", "x")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        assert "BAD" in result["error"]
+
+    def test_unexpected_exception_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_write_note.side_effect = (
+                ContactsError("boom")
+            )
+            result = write_note("ABCD", "x")
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "boom" in result["error"]
