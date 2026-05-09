@@ -145,6 +145,8 @@ ok, err = store.executeSaveRequest_error_(save_req, None)
 
 Multiple operations on a single `CNSaveRequest` are atomic. Use this for bulk updates rather than looping `executeSaveRequest_error_` per contact.
 
+**`removeMember:fromGroup:` silently no-ops (undocumented):** `CNSaveRequest.addMember:toGroup:` works as documented, but its inverse `removeMember:fromGroup:` reports `ok=True, err=None` and **does not actually remove the membership edge**. Empirically verified 2026-05-09 against macOS — neither the contact form (mutable copy of unified vs. predicate-fetched), the group form (CNGroup vs. CNMutableGroup), nor a fresh fetch makes a difference. The codebase routes membership removes through AppleScript instead — `_run_applescript_remove_contact_from_group` in [contacts_connector.py](../../../src/apple_contacts_mcp/contacts_connector.py) issues `tell application "Contacts" … remove p from g … save end tell`. If you're tempted to "fix" the asymmetry by reverting to the CN selector, run `tests/integration/test_group_membership.py::test_add_then_remove_cycle` against real Contacts.app first — it locks in the actual persistence behavior.
+
 ## Phone label tokens (and other labels)
 
 Apple emits raw `_$!<Home>!$_` / `_$!<Work>!$_` / `_$!<Mobile>!$_` tokens — **never the user-visible string** — for built-in labels. Custom labels come back as plain strings. Translate on output for human readability:

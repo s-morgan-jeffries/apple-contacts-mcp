@@ -3,7 +3,7 @@
 Reference for every MCP tool the apple-contacts-mcp server exposes.
 
 **Version:** v0.1.0 (tracks the package version)
-**Tools:** 11
+**Tools:** 13
 
 The source-of-truth for tool behavior is the docstrings in
 [src/apple_contacts_mcp/server.py](../../src/apple_contacts_mcp/server.py)
@@ -544,6 +544,80 @@ def get_contacts_in_group(identifier: str) -> dict[str, Any]
 - Returns the same 4-field shape as `list_contacts` / `search_contacts`. Use `get_contact(id)` to fetch full details for a result.
 - Hard cap at **200 contacts**. `count == limit` indicates the cap was hit.
 - **Pre-flights existence** via `_run_cn_fetch_group`: an unknown `identifier` returns `not_found` distinctly from a real-but-empty group. Costs one extra Contacts.framework call (~ms).
+
+---
+
+### add_contact_to_group
+
+Add an existing contact to an existing group.
+
+```python
+def add_contact_to_group(
+    contact_identifier: str,
+    group_identifier: str,
+) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `contact_identifier` | str | — | The contact's CN identifier (the suffixed `<UUID>:ABPerson` form). |
+| `group_identifier` | str | — | The group's CN identifier (the `id` field from `list_groups`). Must match `CONTACTS_TEST_GROUP` when `CONTACTS_TEST_MODE=true`. |
+
+**Returns:**
+
+```jsonc
+{
+  "success": true,
+  "contact_identifier": "ABCD-…:ABPerson",
+  "group_identifier": "WXYZ-…:ABGroup"
+}
+```
+
+**Error types:** `validation_error`, `safety_violation`, `authorization_denied`, `not_found`, `unknown`.
+
+**Notes:**
+- **Destructive (test-mode gated):** the contact's group memberships are mutated in place. The same contact may belong to multiple groups; this tool adds membership without disturbing existing memberships.
+- `not_found` distinguishes between a missing contact and a missing group via the `error` text (`"Contact not found: ..."` vs `"Group not found: ..."`).
+- Cross-container pairs (e.g., a contact in iCloud added to a group in CardDAV) surface as `unknown` with Apple's NSError text preserved. The integration suite probes this empirically; a typed `container_mismatch` envelope may follow in a later release if the wording is stable.
+
+---
+
+### remove_contact_from_group
+
+Remove an existing contact from an existing group.
+
+```python
+def remove_contact_from_group(
+    contact_identifier: str,
+    group_identifier: str,
+) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `contact_identifier` | str | — | The contact's CN identifier. |
+| `group_identifier` | str | — | The group's CN identifier. Must match `CONTACTS_TEST_GROUP` when `CONTACTS_TEST_MODE=true`. |
+
+**Returns:**
+
+```jsonc
+{
+  "success": true,
+  "contact_identifier": "ABCD-…:ABPerson",
+  "group_identifier": "WXYZ-…:ABGroup"
+}
+```
+
+**Error types:** `validation_error`, `safety_violation`, `authorization_denied`, `not_found`, `unknown`.
+
+**Notes:**
+- **Destructive (test-mode gated):** removes the membership edge only. The contact and the group themselves are untouched.
+- **AppleScript fallback:** Apple's `CNSaveRequest.removeMember:fromGroup:` silently no-ops despite reporting success, so the connector routes through `osascript` (`remove p from g` followed by `save`) instead. Empirically discovered during #18 and locked in by the integration test rig. Apple's add path works fine; only the remove path is asymmetric.
+- Pre-flights existence via the same fetch helper used by `add_contact_to_group`, so `not_found` is dispatched before the AppleScript runs.
 
 ---
 

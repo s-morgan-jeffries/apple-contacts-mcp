@@ -492,6 +492,104 @@ class ContactsConnector:
 
         return identifier
 
+    def _load_contact_and_group(
+        self, contact_identifier: str, group_identifier: str
+    ) -> tuple[Any, Any]:
+        """Fetch live ``(mutable_contact, group)`` pair for membership writes.
+
+        Raises ``ContactsNotFoundError`` with disambiguating text — "Contact
+        not found: ..." vs "Group not found: ..." — so the server-tool layer
+        can dispatch ``not_found`` without inspecting the message.
+
+        Contact is fetched with the minimal key set (just identifier) since
+        we only need identity for the save request.
+        """
+        from Contacts import CNContactIdentifierKey
+
+        store = self._get_store()
+        contact, _err = store.unifiedContactWithIdentifier_keysToFetch_error_(
+            contact_identifier, [CNContactIdentifierKey], None
+        )
+        if contact is None:
+            raise ContactsNotFoundError(
+                f"Contact not found: {contact_identifier!r}"
+            )
+        mutable = contact.mutableCopy()
+
+        group = self._run_cn_fetch_group(group_identifier)
+        if group is None:
+            raise ContactsNotFoundError(
+                f"Group not found: {group_identifier!r}"
+            )
+        return mutable, group
+
+    def _run_cn_add_contact_to_group(
+        self, contact_identifier: str, group_identifier: str
+    ) -> None:
+        """Add an existing contact to an existing group.
+
+        Empirical behavior on duplicate-add is documented by the
+        integration probe in ``tests/integration/test_group_membership.py``.
+        """
+        from Contacts import CNSaveRequest
+
+        mutable, group = self._load_contact_and_group(
+            contact_identifier, group_identifier
+        )
+        save_req = CNSaveRequest.alloc().init()
+        save_req.addMember_toGroup_(mutable, group)
+        store = self._get_store()
+        ok, err = store.executeSaveRequest_error_(save_req, None)
+        if not ok:
+            raise ContactsError(f"CN add-member failed: {err}")
+
+    def _run_applescript_remove_contact_from_group(
+        self, contact_identifier: str, group_identifier: str
+    ) -> None:
+        """Remove a contact from a group via AppleScript.
+
+        **AppleScript fallback (not CN):** ``CNSaveRequest.removeMember:
+        fromGroup:`` silently no-ops despite reporting ``ok=True`` —
+        empirically verified during #18. AppleScript's ``remove p from
+        g`` actually persists. Asymmetric with
+        ``_run_cn_add_contact_to_group`` for that reason.
+
+        Pre-flights both entities via ``_load_contact_and_group`` so the
+        server layer gets clean ``ContactsNotFoundError``s with
+        disambiguating text. AppleScript would otherwise produce a
+        generic "Can't get …" error that we'd have to parse.
+
+        Identifiers are interpolated raw — both are CN-issued UUIDs +
+        suffix and don't need escaping. The ``save`` is load-bearing
+        (same reason as ``write_note``).
+        """
+        # Pre-flight: raises ContactsNotFoundError("Contact not found: ...")
+        # or ContactsNotFoundError("Group not found: ...") as appropriate.
+        # We discard the returned objects; AppleScript operates on ids.
+        self._load_contact_and_group(contact_identifier, group_identifier)
+
+        script = (
+            'tell application "Contacts"\n'
+            f'  set p to first person whose id is "{contact_identifier}"\n'
+            f'  set g to first group whose id is "{group_identifier}"\n'
+            "  remove p from g\n"
+            "  save\n"
+            "end tell"
+        )
+        try:
+            self._run_applescript(script)
+        except ContactsAppleScriptError as exc:
+            # Pre-flight already covers not-found; if AppleScript surfaces
+            # one anyway (e.g., race), translate to ContactsNotFoundError
+            # so the server layer can dispatch `not_found` cleanly.
+            if _is_not_found_error(exc):
+                raise ContactsNotFoundError(
+                    f"Contact or group not found "
+                    f"(contact={contact_identifier!r}, "
+                    f"group={group_identifier!r})"
+                ) from exc
+            raise
+
     def _run_cn_search_contacts(
         self, *, field: SearchField, value: str, limit: int
     ) -> list[dict[str, str]]:
