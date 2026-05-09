@@ -10,6 +10,7 @@ See `docs/research/contacts-api-gap-analysis.md` §7 for the boundary spec.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import threading
 from collections.abc import Callable
@@ -22,6 +23,7 @@ from .exceptions import (
     ContactsNotFoundError,
     ContactsTimeoutError,
 )
+from .utils import escape_applescript_string
 
 if TYPE_CHECKING:
     from Contacts import CNContactStore  # pragma: no cover
@@ -29,6 +31,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SearchField = Literal["name", "phone", "email", "organization"]
+
+
+# AppleScript error patterns that mean "the contact doesn't exist". Translated
+# to ContactsNotFoundError at the connector boundary so the server layer can
+# dispatch a clean not_found response. Pattern set is empirical — tighten or
+# expand as integration tests surface new wordings. The "Invalid index" wording
+# comes back from `whose id is "X"` lookups when no match exists; the curly
+# apostrophe in "Can't" is what AppleScript actually emits, not a bug.
+_APPLESCRIPT_NOT_FOUND_PATTERN = re.compile(
+    r"Can(?:'|’)t get|Invalid index", re.IGNORECASE
+)
+
+
+def _is_not_found_error(exc: ContactsAppleScriptError) -> bool:
+    return bool(_APPLESCRIPT_NOT_FOUND_PATTERN.search(str(exc)))
 
 
 _CN_AUTHORIZATION_STATUS: dict[int, str] = {
@@ -79,6 +96,68 @@ class ContactsConnector:
             raise ContactsAppleScriptError(stderr or "osascript exited non-zero")
 
         return result.stdout.strip()
+
+    def _run_applescript_read_note(self, identifier: str) -> str:
+        """Read the ``note`` field of a contact via AppleScript.
+
+        ``note`` is entitlement-gated in Contacts.framework, so this is the
+        only path. Returns the note text, or ``""`` if the contact has no
+        note set. Raises ``ContactsNotFoundError`` if the contact doesn't
+        exist; other AppleScript errors propagate as
+        ``ContactsAppleScriptError``.
+
+        ``identifier`` must be the full CN identifier (the ``<UUID>:ABPerson``
+        form returned by ``unifiedContactsMatchingPredicate:`` and friends).
+        Bare-UUID input raises ``ContactsNotFoundError`` because AppleScript's
+        ``id of person`` includes the ``:ABPerson`` suffix and ``whose id is
+        "<bare-uuid>"`` won't match. Verified empirically; do not strip.
+        """
+        script = (
+            'tell application "Contacts"\n'
+            f'  set p to first person whose id is "{identifier}"\n'
+            "  if note of p is missing value then\n"
+            '    return ""\n'
+            "  else\n"
+            "    return note of p\n"
+            "  end if\n"
+            "end tell"
+        )
+        try:
+            return self._run_applescript(script)
+        except ContactsAppleScriptError as exc:
+            if _is_not_found_error(exc):
+                raise ContactsNotFoundError(
+                    f"Contact not found: {identifier!r}"
+                ) from exc
+            raise
+
+    def _run_applescript_write_note(
+        self, identifier: str, note: str
+    ) -> None:
+        """Write (replace) the ``note`` field of a contact via AppleScript.
+
+        ``note=""`` clears the note. The trailing ``save`` is load-bearing —
+        without it, edits sit in Contacts.app's in-memory state and don't
+        persist to disk. Raises ``ContactsNotFoundError`` if the contact
+        doesn't exist. ``identifier`` must be the full ``<UUID>:ABPerson``
+        CN identifier (see ``_run_applescript_read_note`` for why).
+        """
+        escaped = escape_applescript_string(note)
+        script = (
+            'tell application "Contacts"\n'
+            f'  set p to first person whose id is "{identifier}"\n'
+            f'  set note of p to "{escaped}"\n'
+            "  save\n"
+            "end tell"
+        )
+        try:
+            self._run_applescript(script)
+        except ContactsAppleScriptError as exc:
+            if _is_not_found_error(exc):
+                raise ContactsNotFoundError(
+                    f"Contact not found: {identifier!r}"
+                ) from exc
+            raise
 
     # ------------------------------------------------------------------
     # Contacts.framework boundary

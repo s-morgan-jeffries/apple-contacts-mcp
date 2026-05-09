@@ -87,6 +87,136 @@ def test_run_applescript_uses_default_timeout_of_10s() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _run_applescript_read_note / _run_applescript_write_note
+# ---------------------------------------------------------------------------
+
+
+def _patch_run_applescript(
+    connector: ContactsConnector,
+    return_value: str | None = None,
+    side_effect: BaseException | None = None,
+) -> Any:
+    """Patch `_run_applescript` on the given connector and return the patcher."""
+    if side_effect is not None:
+        return patch.object(
+            connector, "_run_applescript", side_effect=side_effect
+        )
+    return patch.object(
+        connector, "_run_applescript", return_value=return_value or ""
+    )
+
+
+def test_read_note_returns_applescript_stdout() -> None:
+    connector = ContactsConnector()
+    with _patch_run_applescript(connector, return_value="hello world"):
+        assert (
+            connector._run_applescript_read_note("ABCD-1234:ABPerson")
+            == "hello world"
+        )
+
+
+def test_read_note_passes_identifier_through_unchanged() -> None:
+    """Empirical: AppleScript's `id of person` IS the `:ABPerson`-suffixed
+    form. Stripping breaks lookups. Verified by integration probe; lock the
+    invariant here so future refactors can't reintroduce the strip."""
+    connector = ContactsConnector()
+    with _patch_run_applescript(connector, return_value="") as mock:
+        connector._run_applescript_read_note("ABCD-1234:ABPerson")
+    (script,) = mock.call_args.args
+    assert 'first person whose id is "ABCD-1234:ABPerson"' in script
+
+
+@pytest.mark.parametrize(
+    "applescript_msg",
+    [
+        # Curly apostrophe — what AppleScript actually emits
+        "Contacts got an error: Can’t get person id \"x\". Invalid index. (-1719)",
+        # Straight apostrophe — defensive
+        "Contacts got an error: Can't get person id \"x\"",
+        # "Invalid index" alone (sometimes returned without the Can't-get prefix)
+        "execution error: Invalid index. (-1719)",
+    ],
+)
+def test_read_note_maps_not_found_pattern_to_contacts_not_found(
+    applescript_msg: str,
+) -> None:
+    connector = ContactsConnector()
+    err = ContactsAppleScriptError(applescript_msg)
+    with _patch_run_applescript(connector, side_effect=err):
+        with pytest.raises(ContactsNotFoundError) as exc_info:
+            connector._run_applescript_read_note("missing-id")
+    assert "missing-id" in str(exc_info.value)
+
+
+def test_read_note_reraises_unrelated_applescript_error() -> None:
+    connector = ContactsConnector()
+    err = ContactsAppleScriptError("some other failure")
+    with _patch_run_applescript(connector, side_effect=err):
+        with pytest.raises(ContactsAppleScriptError) as exc_info:
+            connector._run_applescript_read_note("ABCD-1234")
+    assert "some other failure" in str(exc_info.value)
+
+
+def test_write_note_invokes_applescript_with_save() -> None:
+    connector = ContactsConnector()
+    with _patch_run_applescript(connector, return_value="") as mock:
+        connector._run_applescript_write_note("ABCD-1234", "hello")
+    (script,) = mock.call_args.args
+    assert "set note of p to \"hello\"" in script
+    assert "\nsave\n" in script.replace("  ", "")  # save is in the script
+
+
+def test_write_note_escapes_quotes_and_backslashes() -> None:
+    connector = ContactsConnector()
+    with _patch_run_applescript(connector, return_value="") as mock:
+        connector._run_applescript_write_note(
+            "ABCD-1234", 'has "quotes" and \\ backslash'
+        )
+    (script,) = mock.call_args.args
+    assert (
+        'set note of p to "has \\"quotes\\" and \\\\ backslash"' in script
+    )
+
+
+def test_write_note_empty_string_emits_empty_literal() -> None:
+    connector = ContactsConnector()
+    with _patch_run_applescript(connector, return_value="") as mock:
+        connector._run_applescript_write_note("ABCD-1234", "")
+    (script,) = mock.call_args.args
+    assert 'set note of p to ""' in script
+
+
+def test_write_note_passes_identifier_through_unchanged() -> None:
+    connector = ContactsConnector()
+    with _patch_run_applescript(connector, return_value="") as mock:
+        connector._run_applescript_write_note(
+            "ABCD-1234:ABPerson", "x"
+        )
+    (script,) = mock.call_args.args
+    assert 'first person whose id is "ABCD-1234:ABPerson"' in script
+
+
+def test_write_note_maps_not_found_pattern_to_contacts_not_found() -> None:
+    connector = ContactsConnector()
+    err = ContactsAppleScriptError(
+        "Contacts got an error: Can't get person id"
+    )
+    with _patch_run_applescript(connector, side_effect=err):
+        with pytest.raises(ContactsNotFoundError) as exc_info:
+            connector._run_applescript_write_note("missing-id", "x")
+    assert "missing-id" in str(exc_info.value)
+
+
+def test_write_note_reraises_unrelated_applescript_error() -> None:
+    connector = ContactsConnector()
+    err = ContactsAppleScriptError("permission denied or whatever")
+    with _patch_run_applescript(connector, side_effect=err):
+        with pytest.raises(ContactsAppleScriptError) as exc_info:
+            connector._run_applescript_write_note("ABCD-1234", "x")
+    assert "permission denied" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
 # _get_store
 # ---------------------------------------------------------------------------
 
