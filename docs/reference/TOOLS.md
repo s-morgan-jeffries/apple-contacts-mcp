@@ -283,10 +283,10 @@ def create_contact(
 | `organization` | str | `""` | Company / organization name. |
 | `job_title` | str | `""` | Job title. |
 | `department` | str | `""` | Department. |
-| `phones` | list[dict] \| None | None | List of `{"label_raw": str, "value": str}`. |
-| `emails` | list[dict] \| None | None | List of `{"label_raw": str, "value": str}`. `value` must contain `@`. |
-| `urls` | list[dict] \| None | None | List of `{"label_raw": str, "value": str}`. |
-| `postal_addresses` | list[dict] \| None | None | List of dicts with `label_raw` + 8 postal sub-fields (`street`, `sub_locality`, `city`, `sub_administrative_area`, `state`, `postal_code`, `country`, `iso_country_code`). At least one geographic field must be non-empty. |
+| `phones` | list[dict] \| None | None | List of `{"label": str, "value": str}`. |
+| `emails` | list[dict] \| None | None | List of `{"label": str, "value": str}`. `value` must contain `@`. |
+| `urls` | list[dict] \| None | None | List of `{"label": str, "value": str}`. |
+| `postal_addresses` | list[dict] \| None | None | List of dicts with `label` + 8 postal sub-fields (`street`, `sub_locality`, `city`, `sub_administrative_area`, `state`, `postal_code`, `country`, `iso_country_code`). At least one geographic field must be non-empty. |
 | `birthday` | dict \| None | None | `{"year": int, "month": int, "day": int}` (any subset). Month 1-12, day 1-31. |
 | `group_identifier` | str \| None | None | If set, adds the new contact to this group atomically. **Required when `CONTACTS_TEST_MODE=true`** (must equal `CONTACTS_TEST_GROUP`). |
 
@@ -308,7 +308,11 @@ At least one of `given_name`, `family_name`, or `organization` must be non-empty
 
 **Notes:**
 - New contact lands in the `defaultContainerIdentifier` (typically iCloud).
-- Labeled-value `label_raw` is passed to CN as-is. Use Apple tokens like `_$!<Mobile>!$_` for built-in labels (round-trippable from `get_contact`'s `label_raw` field) or any custom string. The reverse mapping (`"mobile"` → `_$!<Mobile>!$_`) is v0.2.0 (#18); for now, prefer raw tokens.
+- Labeled-value `label` accepts three forms (case-insensitive):
+  1. **Human form** like `"mobile"`, `"work"`, `"home fax"`, `"iPhone"`, `"homepage"` — translated to Apple's built-in token via the table in [`utils.label_to_apple_token`](../../src/apple_contacts_mcp/utils.py).
+  2. **Apple token** like `"_$!<Mobile>!$_"` — passed through unchanged.
+  3. **Custom string** like `"Spotify"` — passed through unchanged; Apple stores it as a custom label.
+  English forms only on input; non-English human forms are treated as custom labels. See [`docs/research/label-translation-decision.md`](../research/label-translation-decision.md) for the full table and rationale.
 - The new contact's identifier is populated by CN at save time and returned in the response.
 - In test mode (`CONTACTS_TEST_MODE=true`), this tool refuses unless `group_identifier` matches `CONTACTS_TEST_GROUP` — protects the real address book during integration testing.
 
@@ -369,7 +373,8 @@ Use `get_contact(identifier)` to read back the updated record.
 **Notes:**
 - The `None`-vs-`""` asymmetry with `create_contact` is intentional: update needs to distinguish "not supplied" from "explicitly clear", whereas create has nothing to overwrite.
 - **Clearing birthday entirely is not supported in v0.1.0.** Use Apple's Contacts.app to clear it, or pass a `birthday=` value to overwrite the components. A clear-via-sentinel API may land in v0.2.0+.
-- `group_identifier` is consumed only by the test-mode safety gate — the underlying connector ignores it. Group membership changes go through future `add_member_to_group` / `remove_member_from_group` tools (v0.2.0+).
+- `group_identifier` is consumed only by the test-mode safety gate — the underlying connector ignores it. Group membership changes go through `add_contact_to_group` / `remove_contact_from_group`.
+- Labeled-value `label` follows the same three-form contract as `create_contact`: human form (`"mobile"`, `"home fax"`, …), Apple token (`"_$!<Mobile>!$_"`), or custom string. See `create_contact` notes and [`docs/research/label-translation-decision.md`](../research/label-translation-decision.md).
 
 ---
 

@@ -137,7 +137,7 @@ def test_search_finds_contact_by_unique_phone(
         fields={
             "given_name": "PhoneSearch",
             "family_name": "Fixture",
-            "phones": [{"label_raw": "_$!<Mobile>!$_", "value": unique_phone}],
+            "phones": [{"label": "_$!<Mobile>!$_", "value": unique_phone}],
         },
         group_identifier=test_group,
     )
@@ -161,7 +161,7 @@ def test_search_finds_contact_by_unique_email(
         fields={
             "given_name": "EmailSearch",
             "family_name": "Fixture",
-            "emails": [{"label_raw": "_$!<Work>!$_", "value": unique_email}],
+            "emails": [{"label": "_$!<Work>!$_", "value": unique_email}],
         },
         group_identifier=test_group,
     )

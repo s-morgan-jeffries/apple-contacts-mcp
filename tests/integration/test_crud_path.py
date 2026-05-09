@@ -78,15 +78,15 @@ def test_create_with_full_p1_fields_round_trips(
         "job_title": "Engineer",
         "department": "R&D",
         "phones": [
-            {"label_raw": "_$!<Mobile>!$_", "value": "+1 555-1212"}
+            {"label": "_$!<Mobile>!$_", "value": "+1 555-1212"}
         ],
         "emails": [
-            {"label_raw": "_$!<Home>!$_", "value": "round@example.com"}
+            {"label": "_$!<Home>!$_", "value": "round@example.com"}
         ],
-        "urls": [{"label_raw": "_$!<HomePage>!$_", "value": "https://example.com"}],
+        "urls": [{"label": "_$!<HomePage>!$_", "value": "https://example.com"}],
         "postal_addresses": [
             {
-                "label_raw": "_$!<Home>!$_",
+                "label": "_$!<Home>!$_",
                 "street": "1 Loop",
                 "city": "Cupertino",
                 "state": "CA",
@@ -115,6 +115,45 @@ def test_create_with_full_p1_fields_round_trips(
         assert len(result["postal_addresses"]) == 1
         assert result["postal_addresses"][0]["city"] == "Cupertino"
         assert result["birthday"] == {"year": 1990, "month": 5, "day": 15}
+    finally:
+        real_connector._run_cn_delete_contact(identifier)
+
+
+def test_create_with_human_form_label_translates_to_apple_token(
+    real_connector: ContactsConnector, test_group: str
+) -> None:
+    """The load-bearing integration test for the #22 label table.
+
+    Caller passes the English human form ``"home fax"`` on input. The
+    connector translates it via ``label_to_apple_token`` to the Apple
+    token ``_$!<HomeFAX>!$_``. After save+fetch, the read-side echoes:
+      - ``label_raw`` = the canonical Apple token (identity)
+      - ``label`` = Apple's localized form (human display)
+
+    If the translation is wrong, ``label_raw`` will be ``"home fax"``
+    (custom-label pass-through) instead of the Apple token, and
+    Contacts.app will display it as a custom label rather than the
+    built-in "home fax" type. Either failure surfaces here.
+    """
+    identifier = real_connector._run_cn_create_contact(
+        fields={
+            "given_name": f"LabelTable{uuid.uuid4().hex[:6]}",
+            "family_name": "Probe",
+            "phones": [{"label": "home fax", "value": "+1 555-9000"}],
+        },
+        group_identifier=test_group,
+    )
+    try:
+        result = real_connector._run_cn_unified_contact(identifier)
+        assert result is not None
+        assert len(result["phones"]) == 1
+        phone = result["phones"][0]
+        assert phone["value"] == "+1 555-9000"
+        assert phone["label_raw"] == "_$!<HomeFAX>!$_", (
+            f"Human form 'home fax' must translate to the Apple token; "
+            f"got label_raw={phone['label_raw']!r}"
+        )
+        assert phone["label"] == "home fax"
     finally:
         real_connector._run_cn_delete_contact(identifier)
 
@@ -156,7 +195,7 @@ def test_update_replaces_phones(
     identifier = real_connector._run_cn_create_contact(
         fields={
             "given_name": "PhoneReplace",
-            "phones": [{"label_raw": "_$!<Home>!$_", "value": "+1 555-1111"}],
+            "phones": [{"label": "_$!<Home>!$_", "value": "+1 555-1111"}],
         },
         group_identifier=test_group,
     )
@@ -165,7 +204,7 @@ def test_update_replaces_phones(
             identifier=identifier,
             fields={
                 "phones": [
-                    {"label_raw": "_$!<Mobile>!$_", "value": "+1 555-2222"}
+                    {"label": "_$!<Mobile>!$_", "value": "+1 555-2222"}
                 ]
             },
         )
@@ -238,7 +277,7 @@ def test_full_crud_cycle(
                 "family_name": "Updated",
                 "organization": "AcmeCRUD",
                 "phones": [
-                    {"label_raw": "_$!<Mobile>!$_", "value": "+1 555-9999"}
+                    {"label": "_$!<Mobile>!$_", "value": "+1 555-9999"}
                 ],
             },
         )

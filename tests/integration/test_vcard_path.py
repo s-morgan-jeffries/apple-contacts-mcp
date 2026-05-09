@@ -51,13 +51,13 @@ def test_export_then_import_round_trip(
         fields={
             "phones": [
                 {
-                    "label_raw": "_$!<Mobile>!$_",
+                    "label": "_$!<Mobile>!$_",
                     "value": "+15551234567",
                 }
             ],
             "emails": [
                 {
-                    "label_raw": "_$!<Work>!$_",
+                    "label": "_$!<Work>!$_",
                     "value": "round-trip@example.com",
                 }
             ],

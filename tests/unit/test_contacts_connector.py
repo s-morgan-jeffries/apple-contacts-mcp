@@ -1345,9 +1345,9 @@ def test_create_contact_with_phones_emails_urls(
     connector._run_cn_create_contact(
         fields={
             "given_name": "Alice",
-            "phones": [{"label_raw": "_$!<Mobile>!$_", "value": "+1 555-1212"}],
-            "emails": [{"label_raw": "_$!<Home>!$_", "value": "alice@example.com"}],
-            "urls": [{"label_raw": "", "value": "https://example.com"}],
+            "phones": [{"label": "mobile", "value": "+1 555-1212"}],
+            "emails": [{"label": "home", "value": "alice@example.com"}],
+            "urls": [{"label": "", "value": "https://example.com"}],
         },
         group_identifier=None,
     )
@@ -1367,7 +1367,7 @@ def test_create_contact_with_postal_address(
             "given_name": "Alice",
             "postal_addresses": [
                 {
-                    "label_raw": "_$!<Home>!$_",
+                    "label": "home",
                     "street": "1 Loop", "city": "Cupertino",
                     "state": "CA", "postal_code": "95014",
                     "country": "USA", "iso_country_code": "us",
@@ -1631,7 +1631,7 @@ def test_update_contact_phones_replaces_with_supplied_list(
     connector = ContactsConnector()
     connector._run_cn_update_contact(
         "ABCD",
-        {"phones": [{"label_raw": "_$!<Mobile>!$_", "value": "+1 555-1212"}]},
+        {"phones": [{"label": "mobile", "value": "+1 555-1212"}]},
     )
     mutable.setPhoneNumbers_.assert_called_once()
     args, _ = mutable.setPhoneNumbers_.call_args

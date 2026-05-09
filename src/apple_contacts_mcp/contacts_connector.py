@@ -23,7 +23,7 @@ from .exceptions import (
     ContactsNotFoundError,
     ContactsTimeoutError,
 )
-from .utils import escape_applescript_string
+from .utils import escape_applescript_string, label_to_apple_token
 
 if TYPE_CHECKING:
     from Contacts import CNContactStore  # pragma: no cover
@@ -890,7 +890,7 @@ def _build_mutable_contact(fields: dict[str, Any]) -> Any:
         c.setPhoneNumbers_(
             [
                 CNLabeledValue.labeledValueWithLabel_value_(
-                    p.get("label_raw", ""),
+                    label_to_apple_token(p.get("label", "")),
                     CNPhoneNumber.phoneNumberWithStringValue_(p["value"]),
                 )
                 for p in phones
@@ -900,7 +900,7 @@ def _build_mutable_contact(fields: dict[str, Any]) -> Any:
         c.setEmailAddresses_(
             [
                 CNLabeledValue.labeledValueWithLabel_value_(
-                    e.get("label_raw", ""), e["value"]
+                    label_to_apple_token(e.get("label", "")), e["value"]
                 )
                 for e in emails
             ]
@@ -909,7 +909,7 @@ def _build_mutable_contact(fields: dict[str, Any]) -> Any:
         c.setUrlAddresses_(
             [
                 CNLabeledValue.labeledValueWithLabel_value_(
-                    u.get("label_raw", ""), u["value"]
+                    label_to_apple_token(u.get("label", "")), u["value"]
                 )
                 for u in urls
             ]
@@ -918,7 +918,8 @@ def _build_mutable_contact(fields: dict[str, Any]) -> Any:
         c.setPostalAddresses_(
             [
                 CNLabeledValue.labeledValueWithLabel_value_(
-                    a.get("label_raw", ""), _build_mutable_postal_address(a)
+                    label_to_apple_token(a.get("label", "")),
+                    _build_mutable_postal_address(a),
                 )
                 for a in postal
             ]
@@ -998,7 +999,7 @@ def _apply_update_fields(mutable: Any, fields: dict[str, Any]) -> None:
         mutable.setPhoneNumbers_(
             [
                 CNLabeledValue.labeledValueWithLabel_value_(
-                    p.get("label_raw", ""),
+                    label_to_apple_token(p.get("label", "")),
                     CNPhoneNumber.phoneNumberWithStringValue_(p["value"]),
                 )
                 for p in fields["phones"]
@@ -1008,7 +1009,7 @@ def _apply_update_fields(mutable: Any, fields: dict[str, Any]) -> None:
         mutable.setEmailAddresses_(
             [
                 CNLabeledValue.labeledValueWithLabel_value_(
-                    e.get("label_raw", ""), e["value"]
+                    label_to_apple_token(e.get("label", "")), e["value"]
                 )
                 for e in fields["emails"]
             ]
@@ -1017,7 +1018,7 @@ def _apply_update_fields(mutable: Any, fields: dict[str, Any]) -> None:
         mutable.setUrlAddresses_(
             [
                 CNLabeledValue.labeledValueWithLabel_value_(
-                    u.get("label_raw", ""), u["value"]
+                    label_to_apple_token(u.get("label", "")), u["value"]
                 )
                 for u in fields["urls"]
             ]
@@ -1026,7 +1027,8 @@ def _apply_update_fields(mutable: Any, fields: dict[str, Any]) -> None:
         mutable.setPostalAddresses_(
             [
                 CNLabeledValue.labeledValueWithLabel_value_(
-                    a.get("label_raw", ""), _build_mutable_postal_address(a)
+                    label_to_apple_token(a.get("label", "")),
+                    _build_mutable_postal_address(a),
                 )
                 for a in fields["postal_addresses"]
             ]
