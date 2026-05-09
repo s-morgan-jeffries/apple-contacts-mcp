@@ -1695,3 +1695,262 @@ def test_delete_contact_save_failure_raises(
     with pytest.raises(ContactsError) as exc_info:
         connector._run_cn_delete_contact("ABCD")
     assert "delete boom" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# _run_cn_list_groups
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_group(group_id: str, name: str) -> MagicMock:
+    g = MagicMock(name=f"CNGroup({group_id})")
+    g.identifier.return_value = group_id
+    g.name.return_value = name
+    return g
+
+
+def _make_fake_container(container_id: str) -> MagicMock:
+    c = MagicMock(name=f"CNContainer({container_id})")
+    c.identifier.return_value = container_id
+    return c
+
+
+def _install_fake_contacts_for_groups(
+    monkeypatch: pytest.MonkeyPatch,
+    groups: list[MagicMock] | None,
+    container_lookup: dict[str, list[MagicMock] | None] | None = None,
+    groups_err: object | None = None,
+) -> tuple[MagicMock, MagicMock]:
+    """Install a fake `Contacts` module exposing CNContainer + CNContact +
+    a CNContactStore whose ``groupsMatchingPredicate_error_(None, None)``
+    returns ``(groups, groups_err)`` and whose
+    ``containersMatchingPredicate_error_`` looks up by group id via
+    ``container_lookup``.
+
+    ``container_lookup`` maps group_id → (containers_list, err); a missing
+    key behaves as `(None, fake_error)` to surface raise paths cleanly.
+    """
+    fake_module = types.ModuleType("Contacts")
+
+    cn_container_class = MagicMock(name="CNContainer")
+    # Each call captures the group_id passed in; the predicate object is
+    # opaque but uniquely tied to the group via `.return_value` per call.
+    pred_factory = MagicMock(
+        name="predicateForContainerOfGroupWithIdentifier_"
+    )
+
+    def _pred_factory(group_id: str) -> MagicMock:
+        m = MagicMock(name=f"ContainerPred({group_id})")
+        m._group_id = group_id  # for the store-side dispatcher to read
+        return m
+
+    pred_factory.side_effect = _pred_factory
+    cn_container_class.predicateForContainerOfGroupWithIdentifier_ = (
+        pred_factory
+    )
+    fake_module.CNContainer = cn_container_class  # type: ignore[attr-defined]
+
+    store_instance = MagicMock(name="store_instance")
+    store_instance.groupsMatchingPredicate_error_.return_value = (
+        groups,
+        groups_err,
+    )
+
+    def _containers_dispatch(pred: MagicMock, _err: Any) -> tuple[Any, Any]:
+        gid = getattr(pred, "_group_id", None)
+        if container_lookup is not None and gid in container_lookup:
+            containers, cerr = (
+                container_lookup[gid]
+                if isinstance(container_lookup[gid], tuple)
+                else (container_lookup[gid], None)
+            )
+            return containers, cerr
+        # default: every group resolves to a single fake container
+        return [_make_fake_container(f"container-of-{gid}")], None
+
+    store_instance.containersMatchingPredicate_error_.side_effect = (
+        _containers_dispatch
+    )
+
+    cn_store_class = MagicMock(name="CNContactStore")
+    cn_store_class.alloc.return_value.init.return_value = store_instance
+    fake_module.CNContactStore = cn_store_class  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "Contacts", fake_module)
+    return cn_container_class, store_instance
+
+
+def test_list_groups_empty_store_returns_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_contacts_for_groups(monkeypatch, groups=[])
+    connector = ContactsConnector()
+    assert connector._run_cn_list_groups() == []
+
+
+def test_list_groups_serializes_id_name_and_container_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_groups = [
+        _make_fake_group("G1", "Family"),
+        _make_fake_group("G2", "Work"),
+    ]
+    _install_fake_contacts_for_groups(monkeypatch, groups=fake_groups)
+    connector = ContactsConnector()
+    result = connector._run_cn_list_groups()
+    assert result == [
+        {"id": "G1", "name": "Family", "container_id": "container-of-G1"},
+        {"id": "G2", "name": "Work", "container_id": "container-of-G2"},
+    ]
+
+
+def test_list_groups_falls_back_to_empty_container_id_when_lookup_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_groups = [_make_fake_group("G1", "Orphan")]
+    _install_fake_contacts_for_groups(
+        monkeypatch,
+        groups=fake_groups,
+        container_lookup={"G1": ([], None)},
+    )
+    connector = ContactsConnector()
+    [entry] = connector._run_cn_list_groups()
+    assert entry["container_id"] == ""
+
+
+def test_list_groups_raises_when_groups_predicate_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_err = MagicMock(name="NSError")
+    fake_err.__str__.return_value = "groups-boom"
+    _install_fake_contacts_for_groups(
+        monkeypatch, groups=None, groups_err=fake_err
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_list_groups()
+    assert "groups-boom" in str(exc_info.value)
+
+
+def test_list_groups_raises_when_container_lookup_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_groups = [_make_fake_group("G1", "Family")]
+    fake_err = MagicMock(name="NSError")
+    fake_err.__str__.return_value = "container-boom"
+    _install_fake_contacts_for_groups(
+        monkeypatch,
+        groups=fake_groups,
+        container_lookup={"G1": (None, fake_err)},
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_list_groups()
+    assert "container-boom" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# _run_cn_contacts_in_group
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_contacts_for_group_members(
+    monkeypatch: pytest.MonkeyPatch,
+    results: list[MagicMock] | None,
+    fake_error: object | None = None,
+) -> tuple[MagicMock, MagicMock]:
+    """Install a fake `Contacts` module + a store whose
+    ``unifiedContactsMatchingPredicate_keysToFetch_error_`` returns
+    ``(results, fake_error)``. Returns ``(CNContact_class, store)`` for
+    predicate-call assertions.
+    """
+    fake_module = types.ModuleType("Contacts")
+    fake_module.CNContactIdentifierKey = "id_key"  # type: ignore[attr-defined]
+    fake_module.CNContactGivenNameKey = "given_key"  # type: ignore[attr-defined]
+    fake_module.CNContactFamilyNameKey = "family_key"  # type: ignore[attr-defined]
+    fake_module.CNContactOrganizationNameKey = "org_key"  # type: ignore[attr-defined]
+
+    cn_contact_class = MagicMock(name="CNContact")
+    pred_stub = MagicMock(name="MembershipPredicate")
+    cn_contact_class.predicateForContactsInGroupWithIdentifier_.return_value = (
+        pred_stub
+    )
+    fake_module.CNContact = cn_contact_class  # type: ignore[attr-defined]
+
+    store_instance = MagicMock(name="store_instance")
+    store_instance.unifiedContactsMatchingPredicate_keysToFetch_error_.return_value = (
+        results,
+        fake_error,
+    )
+    cn_store_class = MagicMock(name="CNContactStore")
+    cn_store_class.alloc.return_value.init.return_value = store_instance
+    fake_module.CNContactStore = cn_store_class  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "Contacts", fake_module)
+    return cn_contact_class, store_instance
+
+
+def test_contacts_in_group_predicate_uses_supplied_group_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cn_contact_class, _ = _install_fake_contacts_for_group_members(
+        monkeypatch, results=[]
+    )
+    connector = ContactsConnector()
+    connector._run_cn_contacts_in_group("MY-GROUP", limit=10)
+    cn_contact_class.predicateForContactsInGroupWithIdentifier_.assert_called_once_with(
+        "MY-GROUP"
+    )
+
+
+def test_contacts_in_group_returns_4_field_dicts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = [
+        _make_basic_contact("id-0", "Alice", "Anderson", "Acme"),
+        _make_basic_contact("id-1", "Bob", "Brown", ""),
+    ]
+    _install_fake_contacts_for_group_members(monkeypatch, results=fakes)
+    connector = ContactsConnector()
+    result = connector._run_cn_contacts_in_group("G", limit=200)
+    assert result == [
+        {"id": "id-0", "given_name": "Alice", "family_name": "Anderson", "organization": "Acme"},
+        {"id": "id-1", "given_name": "Bob", "family_name": "Brown", "organization": ""},
+    ]
+
+
+def test_contacts_in_group_caps_at_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fakes = [_make_basic_contact(f"id-{i}") for i in range(250)]
+    _install_fake_contacts_for_group_members(monkeypatch, results=fakes)
+    connector = ContactsConnector()
+    result = connector._run_cn_contacts_in_group("G", limit=200)
+    assert len(result) == 200
+    # 201st contact's selectors must never have been touched.
+    assert fakes[200].identifier.call_count == 0
+
+
+def test_contacts_in_group_empty_for_unknown_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apple's predicate returns [] (not error) for unknown group_ids."""
+    _install_fake_contacts_for_group_members(monkeypatch, results=[])
+    connector = ContactsConnector()
+    assert (
+        connector._run_cn_contacts_in_group("nonexistent", limit=200) == []
+    )
+
+
+def test_contacts_in_group_raises_when_store_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_err = MagicMock(name="NSError")
+    fake_err.__str__.return_value = "membership-boom"
+    _install_fake_contacts_for_group_members(
+        monkeypatch, results=None, fake_error=fake_err
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_contacts_in_group("G", limit=200)
+    assert "membership-boom" in str(exc_info.value)

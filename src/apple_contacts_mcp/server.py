@@ -23,6 +23,7 @@ connector = ContactsConnector()
 
 _LIST_CONTACTS_MAX = 200
 _SEARCH_CONTACTS_MAX = 200
+_LIST_GROUPS_MAX = 200
 
 
 _AUTH_REMEDIATION: dict[str, str] = {
@@ -333,6 +334,104 @@ def search_contacts(
         "count": len(contacts),
         "search_field": field,
         "search_value": value,
+        "limit": _SEARCH_CONTACTS_MAX,
+    }
+
+
+@mcp.tool()
+def list_groups() -> dict[str, Any]:
+    """List all contact groups across all containers.
+
+    Each entry has ``id``, ``name``, and ``container_id``. Use the ``id``
+    with ``get_contacts_in_group(identifier)`` to enumerate the group's
+    members. Returns up to 200 groups (hard cap; nearly nobody has more).
+    Order is not guaranteed.
+
+    Returns:
+        On success: ``{"success": True, "groups": [...], "count": N,
+        "limit": 200}``. ``count == limit`` indicates the cap was hit.
+        On TCC denial: same shape as ``list_contacts`` (status,
+        remediation).
+        On unexpected failure: ``{"success": False, "error_type":
+        "unknown", "error": ...}``.
+    """
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    try:
+        groups = connector._run_cn_list_groups()
+    except Exception as exc:
+        logger.error("list_groups failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"list_groups failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    capped = groups[:_LIST_GROUPS_MAX]
+    return {
+        "success": True,
+        "groups": capped,
+        "count": len(capped),
+        "limit": _LIST_GROUPS_MAX,
+    }
+
+
+@mcp.tool()
+def get_contacts_in_group(identifier: str) -> dict[str, Any]:
+    """List contacts whose membership includes the given group.
+
+    Returns the same 4-field shape as ``list_contacts``. Use
+    ``get_contact(id)`` to fetch full details for a result. Hard cap of
+    200; ``count == limit`` indicates the cap was hit.
+
+    Pre-flights existence via ``_run_cn_fetch_group``: an unknown
+    ``identifier`` returns ``not_found`` distinctly from a real-but-empty
+    group.
+
+    Args:
+        identifier: The group's CN identifier.
+
+    Returns:
+        On success: ``{"success": True, "group_identifier": ...,
+        "contacts": [...], "count": N, "limit": 200}``.
+        On bad input: ``validation_error``.
+        On TCC denial: ``authorization_denied``.
+        On unknown identifier: ``not_found``.
+        On unexpected failure: ``unknown``.
+    """
+    if not identifier or not identifier.strip():
+        return _validation_error("identifier must be a non-empty string")
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    try:
+        group = connector._run_cn_fetch_group(identifier)
+        if group is None:
+            return {
+                "success": False,
+                "error": f"No group found with identifier {identifier!r}",
+                "error_type": "not_found",
+            }
+        contacts = connector._run_cn_contacts_in_group(
+            identifier, _SEARCH_CONTACTS_MAX
+        )
+    except Exception as exc:
+        logger.error("get_contacts_in_group failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"get_contacts_in_group failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {
+        "success": True,
+        "group_identifier": identifier,
+        "contacts": contacts,
+        "count": len(contacts),
         "limit": _SEARCH_CONTACTS_MAX,
     }
 

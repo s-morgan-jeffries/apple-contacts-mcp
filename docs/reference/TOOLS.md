@@ -3,7 +3,7 @@
 Reference for every MCP tool the apple-contacts-mcp server exposes.
 
 **Version:** v0.1.0 (tracks the package version)
-**Tools:** 9
+**Tools:** 11
 
 The source-of-truth for tool behavior is the docstrings in
 [src/apple_contacts_mcp/server.py](../../src/apple_contacts_mcp/server.py)
@@ -475,6 +475,75 @@ def write_note(
 - **Destructive: replaces the note in full** (no append/diff semantics). Use `read_note` first if you need to preserve existing content.
 - Same AppleScript-routing caveats as `read_note`. The connector also issues a `save` after the write — without it, edits sit only in Contacts.app's in-memory state.
 - Test-mode gate is the same shape as `update_contact` (`check_test_mode_safety`, *not* `require_test_mode_for`): outside test mode the call runs freely; in test mode the contact must belong to `CONTACTS_TEST_GROUP`.
+
+---
+
+### list_groups
+
+Enumerate all contact groups across all containers.
+
+```python
+def list_groups() -> dict[str, Any]
+```
+
+**Parameters:** none.
+
+**Returns:**
+
+```jsonc
+{
+  "success": true,
+  "groups": [
+    {"id": "ABCD-…:ABGroup", "name": "Family", "container_id": "iCloud-…"}
+  ],
+  "count": 7,
+  "limit": 200
+}
+```
+
+**Error types:** `authorization_denied`, `unknown`.
+
+**Notes:**
+- Hard cap at **200 groups**. `count == limit` indicates the cap was hit; almost no real address book gets close.
+- Order is not guaranteed (matches Apple's native `groupsMatchingPredicate:` enumeration).
+- `container_id` resolves the parent `CNContainer` per group (one extra Contacts.framework call per group). Empty string is returned defensively when Apple's container lookup yields no result for a live group — shouldn't happen in practice.
+
+---
+
+### get_contacts_in_group
+
+List contacts whose membership includes the given group.
+
+```python
+def get_contacts_in_group(identifier: str) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `identifier` | str | — | The group's CN identifier (the `id` field returned by `list_groups`). |
+
+**Returns:**
+
+```jsonc
+{
+  "success": true,
+  "group_identifier": "ABCD-…:ABGroup",
+  "contacts": [
+    {"id": "WXYZ-…:ABPerson", "given_name": "Alice", "family_name": "Anderson", "organization": "Acme"}
+  ],
+  "count": 12,
+  "limit": 200
+}
+```
+
+**Error types:** `validation_error`, `authorization_denied`, `not_found`, `unknown`.
+
+**Notes:**
+- Returns the same 4-field shape as `list_contacts` / `search_contacts`. Use `get_contact(id)` to fetch full details for a result.
+- Hard cap at **200 contacts**. `count == limit` indicates the cap was hit.
+- **Pre-flights existence** via `_run_cn_fetch_group`: an unknown `identifier` returns `not_found` distinctly from a real-but-empty group. Costs one extra Contacts.framework call (~ms).
 
 ---
 
