@@ -345,10 +345,12 @@ class ContactsConnector:
         """
         from Contacts import (
             CNContact,
+            CNContactEmailAddressesKey,
             CNContactFamilyNameKey,
             CNContactGivenNameKey,
             CNContactIdentifierKey,
             CNContactOrganizationNameKey,
+            CNContactPhoneNumbersKey,
         )
 
         keys = [
@@ -363,10 +365,19 @@ class ContactsConnector:
             case "phone":
                 from Contacts import CNPhoneNumber
 
+                # Apple's phone predicate silently returns zero results if
+                # CNContactPhoneNumbersKey isn't in keysToFetch — the
+                # unification step skips contacts whose matching field
+                # wasn't requested. Empirically verified; not documented.
+                keys.append(CNContactPhoneNumbersKey)
                 pred = CNContact.predicateForContactsMatchingPhoneNumber_(
                     CNPhoneNumber.phoneNumberWithStringValue_(value)
                 )
             case "email":
+                # Email predicate currently matches without
+                # CNContactEmailAddressesKey, but include it for symmetry
+                # with phone in case Apple tightens the unification step.
+                keys.append(CNContactEmailAddressesKey)
                 pred = CNContact.predicateForContactsMatchingEmailAddress_(
                     value
                 )

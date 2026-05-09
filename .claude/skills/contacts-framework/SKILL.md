@@ -119,6 +119,8 @@ results, err = store.unifiedContactsMatchingPredicate_keysToFetch_error_(
 
 For organization-name matching, there's no canned predicate — use a custom `NSPredicate`. Document the workaround as you write it.
 
+**Phone-predicate fetch-keys gotcha (undocumented):** `predicateForContactsMatchingPhoneNumber:` silently returns zero results unless `CNContactPhoneNumbersKey` is in `keysToFetch`. The unification step apparently skips contacts whose matching field wasn't requested. Empirically verified 2026-05-08 against macOS 14 + a contact created and immediately searched in the same store. Email currently matches without `CNContactEmailAddressesKey` but include it anyway for symmetry — Apple may tighten the rule. Bottom line: when filtering by a multi-valued field, always include that field's storage key in `keysToFetch`.
+
 ## Writes — `CNSaveRequest`
 
 Mutations go through `CNSaveRequest`. Build the request, then submit it once.

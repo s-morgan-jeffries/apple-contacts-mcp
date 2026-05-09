@@ -776,6 +776,8 @@ def _install_fake_contacts_for_search(
     fake_module.CNContactGivenNameKey = "given_key"  # type: ignore[attr-defined]
     fake_module.CNContactFamilyNameKey = "family_key"  # type: ignore[attr-defined]
     fake_module.CNContactOrganizationNameKey = "org_key"  # type: ignore[attr-defined]
+    fake_module.CNContactPhoneNumbersKey = "phones_key"  # type: ignore[attr-defined]
+    fake_module.CNContactEmailAddressesKey = "emails_key"  # type: ignore[attr-defined]
 
     cn_contact_class = MagicMock(name="CNContact")
     name_pred = MagicMock(name="NamePredicate")
@@ -951,6 +953,53 @@ def test_search_unknown_field_raises(
             value="x",
             limit=200,
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "required_key"),
+    [
+        ("phone", "+15551234567", "phones_key"),
+        ("email", "alice@example.com", "emails_key"),
+    ],
+)
+def test_search_includes_matched_field_in_keys_to_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+    required_key: str,
+) -> None:
+    """Apple's phone predicate silently returns zero results unless
+    CNContactPhoneNumbersKey is in keysToFetch. We empirically guard the
+    same invariant for email even though it currently matches without."""
+    _, store_instance, _, _ = _install_fake_contacts_for_search(
+        monkeypatch, results=[]
+    )
+    connector = ContactsConnector()
+    connector._run_cn_search_contacts(field=field, value=value, limit=200)  # type: ignore[arg-type]
+    (
+        _pred,
+        keys,
+        _err,
+    ) = store_instance.unifiedContactsMatchingPredicate_keysToFetch_error_.call_args.args
+    assert required_key in keys
+
+
+def test_search_name_keys_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Name search doesn't need any extra keys — the basic 4 are enough."""
+    _, store_instance, _, _ = _install_fake_contacts_for_search(
+        monkeypatch, results=[]
+    )
+    connector = ContactsConnector()
+    connector._run_cn_search_contacts(field="name", value="alice", limit=200)
+    (
+        _pred,
+        keys,
+        _err,
+    ) = store_instance.unifiedContactsMatchingPredicate_keysToFetch_error_.call_args.args
+    assert "phones_key" not in keys
+    assert "emails_key" not in keys
 
 
 def test_search_dict_keys_are_exactly_the_four_basic_fields(

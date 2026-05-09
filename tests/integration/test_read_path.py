@@ -129,9 +129,10 @@ def test_search_finds_contact_by_unique_phone(
 ) -> None:
     """A contact created with a unique phone number is findable via Apple's
     phone predicate, which normalizes punctuation and country codes."""
-    # 14-digit suffix gives an effectively unique number against any
-    # real address book; the leading +1 makes Apple parse it as US E.164.
-    unique_phone = f"+1555{uuid.uuid4().int % 10**10:010d}"
+    # Valid US E.164: +1 + 10-digit subscriber. The 555 area code with a
+    # 7-digit random suffix gives ~10M possibilities — effectively unique
+    # against any real address book and won't trip Apple's length check.
+    unique_phone = f"+1555{uuid.uuid4().int % 10**7:07d}"
     identifier = real_connector._run_cn_create_contact(
         fields={
             "given_name": "PhoneSearch",
