@@ -14,6 +14,7 @@ from apple_contacts_mcp.exceptions import (
 )
 from apple_contacts_mcp.security import _get_test_group_identifiers
 from apple_contacts_mcp.server import (
+    add_contact_to_group,
     check_authorization,
     create_contact,
     delete_contact,
@@ -22,6 +23,7 @@ from apple_contacts_mcp.server import (
     list_contacts,
     list_groups,
     read_note,
+    remove_contact_from_group,
     search_contacts,
     update_contact,
     write_note,
@@ -1368,3 +1370,231 @@ class TestGetContactsInGroupErrors:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "members-boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# add_contact_to_group
+# ---------------------------------------------------------------------------
+
+
+class TestAddContactToGroupValidation:
+    @pytest.mark.parametrize("contact_identifier", ["", "   ", "\t"])
+    def test_blank_contact_identifier_returns_validation_error(
+        self, contact_identifier: str
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = add_contact_to_group(contact_identifier, "GROUP")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "contact_identifier" in result["error"]
+        mock_connector._run_cn_add_contact_to_group.assert_not_called()
+
+    @pytest.mark.parametrize("group_identifier", ["", "   ", "\t"])
+    def test_blank_group_identifier_returns_validation_error(
+        self, group_identifier: str
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = add_contact_to_group("CONTACT", group_identifier)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "group_identifier" in result["error"]
+        mock_connector._run_cn_add_contact_to_group.assert_not_called()
+
+
+class TestAddContactToGroupAuthFlow:
+    def test_auth_denied_passthrough(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = add_contact_to_group("CONTACT", "GROUP")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_cn_add_contact_to_group.assert_not_called()
+
+
+class TestAddContactToGroupTestModeSafety:
+    def test_test_mode_with_wrong_group_blocked(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = add_contact_to_group("CONTACT", "Some-Other-Group")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_connector._run_cn_add_contact_to_group.assert_not_called()
+
+    def test_test_mode_with_matching_group_proceeds(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_add_contact_to_group.return_value = None
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = add_contact_to_group("CONTACT", "MCP-Test")
+        assert result == {
+            "success": True,
+            "contact_identifier": "CONTACT",
+            "group_identifier": "MCP-Test",
+        }
+
+
+class TestAddContactToGroupHappyPath:
+    def test_returns_both_identifiers(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_add_contact_to_group.return_value = None
+            result = add_contact_to_group("CONTACT", "GROUP")
+        assert result == {
+            "success": True,
+            "contact_identifier": "CONTACT",
+            "group_identifier": "GROUP",
+        }
+        mock_connector._run_cn_add_contact_to_group.assert_called_once_with(
+            "CONTACT", "GROUP"
+        )
+
+    def test_response_keys_are_minimal(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_add_contact_to_group.return_value = None
+            result = add_contact_to_group("CONTACT", "GROUP")
+        assert set(result.keys()) == {
+            "success",
+            "contact_identifier",
+            "group_identifier",
+        }
+
+
+class TestAddContactToGroupErrors:
+    def test_not_found_dispatches_for_missing_contact(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_add_contact_to_group.side_effect = (
+                ContactsNotFoundError("Contact not found: 'BAD'")
+            )
+            result = add_contact_to_group("BAD", "GROUP")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        assert "Contact not found" in result["error"]
+
+    def test_not_found_dispatches_for_missing_group(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_add_contact_to_group.side_effect = (
+                ContactsNotFoundError("Group not found: 'BAD-GROUP'")
+            )
+            result = add_contact_to_group("CONTACT", "BAD-GROUP")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        assert "Group not found" in result["error"]
+
+    def test_unexpected_exception_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_add_contact_to_group.side_effect = (
+                ContactsError("add-boom")
+            )
+            result = add_contact_to_group("CONTACT", "GROUP")
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "add-boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# remove_contact_from_group
+# ---------------------------------------------------------------------------
+
+
+class TestRemoveContactFromGroupValidation:
+    @pytest.mark.parametrize("contact_identifier", ["", "   ", "\t"])
+    def test_blank_contact_identifier_returns_validation_error(
+        self, contact_identifier: str
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = remove_contact_from_group(contact_identifier, "GROUP")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "contact_identifier" in result["error"]
+        mock_connector._run_applescript_remove_contact_from_group.assert_not_called()
+
+    @pytest.mark.parametrize("group_identifier", ["", "   ", "\t"])
+    def test_blank_group_identifier_returns_validation_error(
+        self, group_identifier: str
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = remove_contact_from_group("CONTACT", group_identifier)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "group_identifier" in result["error"]
+        mock_connector._run_applescript_remove_contact_from_group.assert_not_called()
+
+
+class TestRemoveContactFromGroupAuthFlow:
+    def test_auth_denied_passthrough(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = remove_contact_from_group("CONTACT", "GROUP")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_applescript_remove_contact_from_group.assert_not_called()
+
+
+class TestRemoveContactFromGroupTestModeSafety:
+    def test_test_mode_with_wrong_group_blocked(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = remove_contact_from_group("CONTACT", "Some-Other")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_connector._run_applescript_remove_contact_from_group.assert_not_called()
+
+
+class TestRemoveContactFromGroupHappyPath:
+    def test_returns_both_identifiers(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_remove_contact_from_group.return_value = None
+            result = remove_contact_from_group("CONTACT", "GROUP")
+        assert result == {
+            "success": True,
+            "contact_identifier": "CONTACT",
+            "group_identifier": "GROUP",
+        }
+        mock_connector._run_applescript_remove_contact_from_group.assert_called_once_with(
+            "CONTACT", "GROUP"
+        )
+
+
+class TestRemoveContactFromGroupErrors:
+    def test_not_found_dispatches(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_remove_contact_from_group.side_effect = (
+                ContactsNotFoundError("Group not found: 'BAD'")
+            )
+            result = remove_contact_from_group("CONTACT", "BAD")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+
+    def test_unexpected_exception_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_remove_contact_from_group.side_effect = (
+                ContactsError("remove-boom")
+            )
+            result = remove_contact_from_group("CONTACT", "GROUP")
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "remove-boom" in result["error"]

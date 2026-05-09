@@ -36,6 +36,8 @@ DESTRUCTIVE_OPERATIONS: frozenset[str] = frozenset(
         "update_contact",
         "delete_contact",
         "write_note",
+        "add_contact_to_group",
+        "remove_contact_from_group",
     }
 )
 """Operations gated by `check_test_mode_safety`.

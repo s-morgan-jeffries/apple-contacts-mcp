@@ -1454,6 +1454,7 @@ def _install_fake_contacts_for_modify(
     fetched_contact: MagicMock | None,
     save_succeeds: bool = True,
     fake_save_error: Any | None = None,
+    group_results: list[Any] | None = None,
 ) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
     """Install a fake `Contacts` + `Foundation` set for update/delete tests.
 
@@ -1507,6 +1508,15 @@ def _install_fake_contacts_for_modify(
     cn_save_request_class.alloc.return_value.init.return_value = save_request_instance
     fake_contacts.CNSaveRequest = cn_save_request_class  # type: ignore[attr-defined]
 
+    # CNGroup is consulted by `_run_cn_fetch_group`, which is reused by the
+    # group-membership writes (`_load_contact_and_group`). For tests that
+    # don't touch groups, group_results stays None and the store will return
+    # an empty list — which is fine because those tests never reach the
+    # group-fetch branch.
+    cn_group_class = MagicMock(name="CNGroup")
+    cn_group_class.predicateForGroupsWithIdentifiers_.return_value = "GROUP_PRED"
+    fake_contacts.CNGroup = cn_group_class  # type: ignore[attr-defined]
+
     cn_store_class = MagicMock(name="CNContactStore")
     store_instance = MagicMock(name="store_instance")
     if fetched_contact is None:
@@ -1526,6 +1536,15 @@ def _install_fake_contacts_for_modify(
         save_succeeds,
         fake_save_error,
     )
+    if group_results is None:
+        # Default: no group present (used for non-membership tests; safe since
+        # they never call _run_cn_fetch_group).
+        store_instance.groupsMatchingPredicate_error_.return_value = ([], None)
+    else:
+        store_instance.groupsMatchingPredicate_error_.return_value = (
+            group_results,
+            None,
+        )
     cn_store_class.alloc.return_value.init.return_value = store_instance
     fake_contacts.CNContactStore = cn_store_class  # type: ignore[attr-defined]
 
@@ -1954,3 +1973,221 @@ def test_contacts_in_group_raises_when_store_returns_none(
     with pytest.raises(ContactsError) as exc_info:
         connector._run_cn_contacts_in_group("G", limit=200)
     assert "membership-boom" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# _load_contact_and_group + _run_cn_add_contact_to_group +
+# _run_cn_remove_contact_from_group
+# ---------------------------------------------------------------------------
+
+
+def test_load_contact_and_group_happy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="fetched_contact")
+    fake_group = MagicMock(name="CNGroup_instance")
+    store, mutable, _save_req, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched, group_results=[fake_group]
+    )
+    connector = ContactsConnector()
+    got_mutable, got_group = connector._load_contact_and_group(
+        "CONTACT-1", "GROUP-1"
+    )
+    assert got_mutable is mutable
+    assert got_group is fake_group
+
+
+def test_load_contact_and_group_raises_when_contact_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_contacts_for_modify(
+        monkeypatch,
+        fetched_contact=None,
+        group_results=[MagicMock(name="never-reached")],
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsNotFoundError) as exc_info:
+        connector._load_contact_and_group("BAD-CONTACT", "GROUP-1")
+    assert "Contact not found" in str(exc_info.value)
+    assert "BAD-CONTACT" in str(exc_info.value)
+
+
+def test_load_contact_and_group_raises_when_group_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="fetched_contact")
+    _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched, group_results=[]
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsNotFoundError) as exc_info:
+        connector._load_contact_and_group("CONTACT-1", "BAD-GROUP")
+    assert "Group not found" in str(exc_info.value)
+    assert "BAD-GROUP" in str(exc_info.value)
+
+
+# ----- _run_cn_add_contact_to_group ----------------------------------------
+
+
+def test_add_contact_to_group_happy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="fetched_contact")
+    fake_group = MagicMock(name="CNGroup_instance")
+    store, mutable, save_req, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched, group_results=[fake_group]
+    )
+    connector = ContactsConnector()
+    connector._run_cn_add_contact_to_group("CONTACT-1", "GROUP-1")
+    save_req.addMember_toGroup_.assert_called_once_with(mutable, fake_group)
+    save_req.removeMember_fromGroup_.assert_not_called()
+    store.executeSaveRequest_error_.assert_called_once()
+
+
+def test_add_contact_to_group_raises_not_found_when_contact_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_contacts_for_modify(
+        monkeypatch,
+        fetched_contact=None,
+        group_results=[MagicMock(name="g")],
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsNotFoundError) as exc_info:
+        connector._run_cn_add_contact_to_group("BAD-CONTACT", "GROUP-1")
+    assert "Contact not found" in str(exc_info.value)
+
+
+def test_add_contact_to_group_raises_not_found_when_group_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="fetched_contact")
+    _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched, group_results=[]
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsNotFoundError) as exc_info:
+        connector._run_cn_add_contact_to_group("CONTACT-1", "BAD-GROUP")
+    assert "Group not found" in str(exc_info.value)
+
+
+def test_add_contact_to_group_save_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="fetched_contact")
+    fake_group = MagicMock(name="CNGroup_instance")
+    fake_save_error = MagicMock(name="NSError(save)")
+    fake_save_error.__str__.return_value = "add-boom"
+    _install_fake_contacts_for_modify(
+        monkeypatch,
+        fetched_contact=fetched,
+        group_results=[fake_group],
+        save_succeeds=False,
+        fake_save_error=fake_save_error,
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_add_contact_to_group("CONTACT-1", "GROUP-1")
+    assert "CN add-member failed" in str(exc_info.value)
+    assert "add-boom" in str(exc_info.value)
+
+
+# ----- _run_applescript_remove_contact_from_group --------------------------
+
+
+def test_remove_contact_from_group_invokes_applescript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The remove path uses AppleScript (CN's `removeMember:fromGroup:`
+    silently no-ops on macOS — verified during #18). Pre-flight via
+    `_load_contact_and_group` for clean not-found errors, then run the
+    AppleScript."""
+    fetched = MagicMock(name="fetched_contact")
+    fake_group = MagicMock(name="CNGroup_instance")
+    _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched, group_results=[fake_group]
+    )
+    connector = ContactsConnector()
+    with patch.object(connector, "_run_applescript", return_value="") as mock:
+        connector._run_applescript_remove_contact_from_group(
+            "CONTACT-1:ABPerson", "GROUP-1:ABGroup"
+        )
+    (script,) = mock.call_args.args
+    assert 'first person whose id is "CONTACT-1:ABPerson"' in script
+    assert 'first group whose id is "GROUP-1:ABGroup"' in script
+    assert "remove p from g" in script
+    assert "\n  save\n" in script
+
+
+def test_remove_contact_from_group_raises_not_found_when_contact_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-flight catches missing contact before AppleScript runs."""
+    _install_fake_contacts_for_modify(
+        monkeypatch,
+        fetched_contact=None,
+        group_results=[MagicMock(name="g")],
+    )
+    connector = ContactsConnector()
+    with patch.object(connector, "_run_applescript") as mock:
+        with pytest.raises(ContactsNotFoundError) as exc_info:
+            connector._run_applescript_remove_contact_from_group(
+                "BAD-CONTACT", "GROUP-1"
+            )
+    assert "Contact not found" in str(exc_info.value)
+    mock.assert_not_called()
+
+
+def test_remove_contact_from_group_raises_not_found_when_group_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="fetched_contact")
+    _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched, group_results=[]
+    )
+    connector = ContactsConnector()
+    with patch.object(connector, "_run_applescript") as mock:
+        with pytest.raises(ContactsNotFoundError) as exc_info:
+            connector._run_applescript_remove_contact_from_group(
+                "CONTACT-1", "BAD-GROUP"
+            )
+    assert "Group not found" in str(exc_info.value)
+    mock.assert_not_called()
+
+
+def test_remove_contact_from_group_translates_applescript_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If AppleScript surfaces a not-found error (e.g., a race), translate
+    to ContactsNotFoundError so the server layer dispatches `not_found`."""
+    fetched = MagicMock(name="fetched_contact")
+    fake_group = MagicMock(name="CNGroup_instance")
+    _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched, group_results=[fake_group]
+    )
+    connector = ContactsConnector()
+    err = ContactsAppleScriptError("Can't get person id \"X\"")
+    with patch.object(connector, "_run_applescript", side_effect=err):
+        with pytest.raises(ContactsNotFoundError) as exc_info:
+            connector._run_applescript_remove_contact_from_group(
+                "CONTACT-1", "GROUP-1"
+            )
+    assert "Contact or group not found" in str(exc_info.value)
+
+
+def test_remove_contact_from_group_reraises_unrelated_applescript_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="fetched_contact")
+    fake_group = MagicMock(name="CNGroup_instance")
+    _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched, group_results=[fake_group]
+    )
+    connector = ContactsConnector()
+    err = ContactsAppleScriptError("permission denied or whatever")
+    with patch.object(connector, "_run_applescript", side_effect=err):
+        with pytest.raises(ContactsAppleScriptError) as exc_info:
+            connector._run_applescript_remove_contact_from_group(
+                "CONTACT-1", "GROUP-1"
+            )
+    assert "permission denied" in str(exc_info.value)

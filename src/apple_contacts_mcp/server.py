@@ -944,6 +944,149 @@ def write_note(
     return {"success": True, "identifier": identifier}
 
 
+@mcp.tool()
+def add_contact_to_group(
+    contact_identifier: str,
+    group_identifier: str,
+) -> dict[str, Any]:
+    """Add an existing contact to an existing group.
+
+    Destructive (test-mode gated): the contact's group membership is
+    mutated in place. The same contact may belong to multiple groups; this
+    tool adds membership without disturbing existing memberships.
+
+    Args:
+        contact_identifier: The contact's CN identifier (the suffixed
+            ``<UUID>:ABPerson`` form returned by other tools).
+        group_identifier: The group's CN identifier (the ``id`` field
+            from ``list_groups``). Required for the test-mode safety
+            gate — must match ``CONTACTS_TEST_GROUP`` when
+            ``CONTACTS_TEST_MODE=true``.
+
+    Returns:
+        On success: ``{"success": True, "contact_identifier": ...,
+        "group_identifier": ...}``.
+        On bad input: ``validation_error``.
+        On TCC denial: ``authorization_denied``.
+        On test-mode mismatch: ``safety_violation``.
+        On unknown contact or group: ``not_found`` (the message indicates
+        which entity was missing).
+        On unexpected failure (including cross-container pairs):
+        ``unknown`` with Apple's NSError text preserved.
+    """
+    if not contact_identifier or not contact_identifier.strip():
+        return _validation_error(
+            "contact_identifier must be a non-empty string"
+        )
+    if not group_identifier or not group_identifier.strip():
+        return _validation_error(
+            "group_identifier must be a non-empty string"
+        )
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    safety_err = check_test_mode_safety(
+        "add_contact_to_group", group=group_identifier
+    )
+    if safety_err is not None:
+        return safety_err
+
+    try:
+        connector._run_cn_add_contact_to_group(
+            contact_identifier, group_identifier
+        )
+    except ContactsNotFoundError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": "not_found",
+        }
+    except Exception as exc:
+        logger.error("add_contact_to_group failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"add_contact_to_group failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {
+        "success": True,
+        "contact_identifier": contact_identifier,
+        "group_identifier": group_identifier,
+    }
+
+
+@mcp.tool()
+def remove_contact_from_group(
+    contact_identifier: str,
+    group_identifier: str,
+) -> dict[str, Any]:
+    """Remove an existing contact from an existing group.
+
+    Destructive (test-mode gated): the contact's group membership is
+    mutated in place. The contact itself is not deleted; only the
+    membership edge is removed.
+
+    Args:
+        contact_identifier: The contact's CN identifier.
+        group_identifier: The group's CN identifier. Required for the
+            test-mode safety gate.
+
+    Returns:
+        On success: ``{"success": True, "contact_identifier": ...,
+        "group_identifier": ...}``.
+        On bad input: ``validation_error``.
+        On TCC denial: ``authorization_denied``.
+        On test-mode mismatch: ``safety_violation``.
+        On unknown contact or group: ``not_found``.
+        On unexpected failure: ``unknown``.
+    """
+    if not contact_identifier or not contact_identifier.strip():
+        return _validation_error(
+            "contact_identifier must be a non-empty string"
+        )
+    if not group_identifier or not group_identifier.strip():
+        return _validation_error(
+            "group_identifier must be a non-empty string"
+        )
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    safety_err = check_test_mode_safety(
+        "remove_contact_from_group", group=group_identifier
+    )
+    if safety_err is not None:
+        return safety_err
+
+    try:
+        connector._run_applescript_remove_contact_from_group(
+            contact_identifier, group_identifier
+        )
+    except ContactsNotFoundError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": "not_found",
+        }
+    except Exception as exc:
+        logger.error("remove_contact_from_group failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"remove_contact_from_group failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {
+        "success": True,
+        "contact_identifier": contact_identifier,
+        "group_identifier": group_identifier,
+    }
+
+
 def main() -> None:
     """Start the MCP server."""
     mcp.run()
