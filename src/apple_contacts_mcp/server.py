@@ -1009,8 +1009,10 @@ def read_note(identifier: str) -> dict[str, Any]:
     this tool routes through ``osascript`` against Contacts.app.
 
     Args:
-        identifier: The contact's CN identifier (e.g.
-            ``"BD0B...:ABPerson"`` or just the bare UUID).
+        identifier: The contact's full CN identifier including the
+            ``:ABPerson`` suffix (e.g., ``"BD0B...:ABPerson"``). Bare UUIDs
+            are not accepted — AppleScript's ``id of person`` includes the
+            suffix and won't match without it.
 
     Returns:
         On success: ``{"success": True, "identifier": ..., "note": ...}``.

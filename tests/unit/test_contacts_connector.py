@@ -196,6 +196,25 @@ def test_write_note_passes_identifier_through_unchanged() -> None:
     assert 'first person whose id is "ABCD-1234:ABPerson"' in script
 
 
+def test_write_note_escapes_adversarial_identifier() -> None:
+    """Defense-in-depth: identifiers containing AppleScript metacharacters
+    are escaped before interpolation. Real CN identifiers never contain
+    these characters, so this is a safety net for adversarial input."""
+    connector = ContactsConnector()
+    with _patch_run_applescript(connector, return_value="") as mock:
+        connector._run_applescript_write_note('x" & "y', "note")
+    (script,) = mock.call_args.args
+    assert 'first person whose id is "x\\" & \\"y"' in script
+
+
+def test_read_note_escapes_adversarial_identifier() -> None:
+    connector = ContactsConnector()
+    with _patch_run_applescript(connector, return_value="") as mock:
+        connector._run_applescript_read_note('x" & "y')
+    (script,) = mock.call_args.args
+    assert 'first person whose id is "x\\" & \\"y"' in script
+
+
 def test_write_note_maps_not_found_pattern_to_contacts_not_found() -> None:
     connector = ContactsConnector()
     err = ContactsAppleScriptError(
@@ -2191,6 +2210,27 @@ def test_remove_contact_from_group_reraises_unrelated_applescript_error(
                 "CONTACT-1", "GROUP-1"
             )
     assert "permission denied" in str(exc_info.value)
+
+
+def test_remove_contact_from_group_escapes_adversarial_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defense-in-depth: identifiers containing AppleScript metacharacters
+    are escaped before interpolation. Real CN identifiers never contain
+    these characters, so this is a safety net for adversarial input."""
+    fetched = MagicMock(name="fetched_contact")
+    fake_group = MagicMock(name="CNGroup_instance")
+    _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched, group_results=[fake_group]
+    )
+    connector = ContactsConnector()
+    with patch.object(connector, "_run_applescript", return_value="") as mock:
+        connector._run_applescript_remove_contact_from_group(
+            'c" & "x', 'g" & "y'
+        )
+    (script,) = mock.call_args.args
+    assert 'first person whose id is "c\\" & \\"x"' in script
+    assert 'first group whose id is "g\\" & \\"y"' in script
 
 
 # ---------------------------------------------------------------------------

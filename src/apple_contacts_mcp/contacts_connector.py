@@ -111,10 +111,17 @@ class ContactsConnector:
         Bare-UUID input raises ``ContactsNotFoundError`` because AppleScript's
         ``id of person`` includes the ``:ABPerson`` suffix and ``whose id is
         "<bare-uuid>"`` won't match. Verified empirically; do not strip.
+
+        The identifier is escaped via ``escape_applescript_string`` before
+        interpolation. CN-issued identifiers contain only hex digits, hyphens,
+        colons, and letters — none of which the helper transforms — so this
+        is a no-op in normal use and a defense-in-depth boundary for
+        adversarial input.
         """
+        escaped_id = escape_applescript_string(identifier)
         script = (
             'tell application "Contacts"\n'
-            f'  set p to first person whose id is "{identifier}"\n'
+            f'  set p to first person whose id is "{escaped_id}"\n'
             "  if note of p is missing value then\n"
             '    return ""\n'
             "  else\n"
@@ -142,11 +149,12 @@ class ContactsConnector:
         doesn't exist. ``identifier`` must be the full ``<UUID>:ABPerson``
         CN identifier (see ``_run_applescript_read_note`` for why).
         """
-        escaped = escape_applescript_string(note)
+        escaped_note = escape_applescript_string(note)
+        escaped_id = escape_applescript_string(identifier)
         script = (
             'tell application "Contacts"\n'
-            f'  set p to first person whose id is "{identifier}"\n'
-            f'  set note of p to "{escaped}"\n'
+            f'  set p to first person whose id is "{escaped_id}"\n'
+            f'  set note of p to "{escaped_note}"\n'
             "  save\n"
             "end tell"
         )
@@ -637,19 +645,23 @@ class ContactsConnector:
         disambiguating text. AppleScript would otherwise produce a
         generic "Can't get …" error that we'd have to parse.
 
-        Identifiers are interpolated raw — both are CN-issued UUIDs +
-        suffix and don't need escaping. The ``save`` is load-bearing
-        (same reason as ``write_note``).
+        Identifiers are escaped via ``escape_applescript_string`` as
+        defense-in-depth — CN-issued identifiers contain only hex digits,
+        hyphens, colons, and letters, so the helper is a no-op for
+        legitimate input but blocks AppleScript injection on adversarial
+        input. The ``save`` is load-bearing (same reason as ``write_note``).
         """
         # Pre-flight: raises ContactsNotFoundError("Contact not found: ...")
         # or ContactsNotFoundError("Group not found: ...") as appropriate.
         # We discard the returned objects; AppleScript operates on ids.
         self._load_contact_and_group(contact_identifier, group_identifier)
 
+        escaped_contact_id = escape_applescript_string(contact_identifier)
+        escaped_group_id = escape_applescript_string(group_identifier)
         script = (
             'tell application "Contacts"\n'
-            f'  set p to first person whose id is "{contact_identifier}"\n'
-            f'  set g to first group whose id is "{group_identifier}"\n'
+            f'  set p to first person whose id is "{escaped_contact_id}"\n'
+            f'  set g to first group whose id is "{escaped_group_id}"\n'
             "  remove p from g\n"
             "  save\n"
             "end tell"
