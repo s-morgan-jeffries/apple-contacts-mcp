@@ -492,6 +492,84 @@ class ContactsConnector:
 
         return identifier
 
+    def _run_cn_export_vcard(self, identifiers: list[str]) -> str:
+        """Export one or more contacts as vCard 3.0 text.
+
+        Atomic: any single missing identifier raises ``ContactsNotFoundError``
+        before serialization runs. Returned text is exactly what Apple's
+        serializer emits — vCard 3.0 with Apple's specific quirks
+        (lowercase ``type=`` parameters, ``X-APPLE-OMIT-YEAR=1604`` for
+        year-less BDAYs, NOTE field omitted because it's entitlement-gated).
+        See ``docs/research/vcard-version-decision.md`` for the full
+        rationale.
+        """
+        from Contacts import CNContactVCardSerialization
+
+        descriptor = CNContactVCardSerialization.descriptorForRequiredKeys()
+        store = self._get_store()
+        contacts = []
+        for ident in identifiers:
+            c, _err = store.unifiedContactWithIdentifier_keysToFetch_error_(
+                ident, [descriptor], None
+            )
+            if c is None:
+                raise ContactsNotFoundError(
+                    f"Contact not found: {ident!r}"
+                )
+            contacts.append(c)
+        data, err = CNContactVCardSerialization.dataWithContacts_error_(
+            contacts, None
+        )
+        if data is None:
+            raise ContactsError(f"vCard serialization failed: {err}")
+        return bytes(data).decode("utf-8")
+
+    def _run_cn_import_vcard(
+        self, vcard_text: str, group_identifier: str | None
+    ) -> list[str]:
+        """Parse a vCard payload (3.0 or 4.0 input both accepted) and persist
+        as new contacts via a single CNSaveRequest. Optionally adds each
+        new contact to a group. Returns the list of new CN identifiers
+        in input order.
+
+        Atomic: parse failure, empty input, group-not-found, or save
+        failure aborts the whole operation. A multi-contact vCard is
+        committed as one unit.
+        """
+        from Contacts import CNContactVCardSerialization, CNSaveRequest
+
+        data = vcard_text.encode("utf-8")
+        parsed, err = CNContactVCardSerialization.contactsWithData_error_(
+            data, None
+        )
+        if parsed is None:
+            raise ContactsError(f"vCard parse failed: {err}")
+        if len(parsed) == 0:
+            raise ContactsError("No vCards found in input")
+
+        group = None
+        if group_identifier is not None:
+            group = self._run_cn_fetch_group(group_identifier)
+            if group is None:
+                raise ContactsNotFoundError(
+                    f"Group not found: {group_identifier!r}"
+                )
+
+        save_req = CNSaveRequest.alloc().init()
+        mutables = []
+        for c in parsed:
+            m = c.mutableCopy()
+            save_req.addContact_toContainerWithIdentifier_(m, None)
+            if group is not None:
+                save_req.addMember_toGroup_(m, group)
+            mutables.append(m)
+
+        store = self._get_store()
+        ok, err = store.executeSaveRequest_error_(save_req, None)
+        if not ok:
+            raise ContactsError(f"CN save failed: {err}")
+        return [str(m.identifier()) for m in mutables]
+
     def _load_contact_and_group(
         self, contact_identifier: str, group_identifier: str
     ) -> tuple[Any, Any]:

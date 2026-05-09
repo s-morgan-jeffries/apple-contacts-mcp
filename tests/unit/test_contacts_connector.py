@@ -2191,3 +2191,305 @@ def test_remove_contact_from_group_reraises_unrelated_applescript_error(
                 "CONTACT-1", "GROUP-1"
             )
     assert "permission denied" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# _run_cn_export_vcard / _run_cn_import_vcard
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_contacts_for_vcard(
+    monkeypatch: pytest.MonkeyPatch,
+    fetched_contacts: dict[str, MagicMock | None] | None = None,
+    export_data: bytes | None = None,
+    export_error: object | None = None,
+    parsed_contacts: list[MagicMock] | None = None,
+    parse_error: object | None = None,
+    group_results: list[Any] | None = None,
+    save_succeeds: bool = True,
+    fake_save_error: Any | None = None,
+) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
+    """Install a fake `Contacts` module + store for vCard tests.
+
+    ``fetched_contacts``: id → CNContact mock (or None for not-found). Used
+    for export's per-id ``unifiedContactWithIdentifier_`` lookups.
+    ``export_data`` / ``export_error``: drives ``dataWithContacts_error_``.
+    ``parsed_contacts`` / ``parse_error``: drives ``contactsWithData_error_``.
+    ``group_results``: list of CNGroup mocks (or empty list to simulate
+    missing) returned by ``groupsMatchingPredicate_error_``.
+
+    Returns ``(store, vcard_class, save_req, cn_save_request_class)``.
+    """
+    fake_contacts = types.ModuleType("Contacts")
+
+    cn_vcard_class = MagicMock(name="CNContactVCardSerialization")
+    cn_vcard_class.descriptorForRequiredKeys.return_value = "VCARD_DESCRIPTOR"
+    cn_vcard_class.dataWithContacts_error_.return_value = (
+        export_data,
+        export_error,
+    )
+    cn_vcard_class.contactsWithData_error_.return_value = (
+        parsed_contacts,
+        parse_error,
+    )
+    fake_contacts.CNContactVCardSerialization = cn_vcard_class  # type: ignore[attr-defined]
+
+    cn_save_request_class = MagicMock(name="CNSaveRequest")
+    save_request_instance = MagicMock(name="save_request_instance")
+    cn_save_request_class.alloc.return_value.init.return_value = (
+        save_request_instance
+    )
+    fake_contacts.CNSaveRequest = cn_save_request_class  # type: ignore[attr-defined]
+
+    cn_group_class = MagicMock(name="CNGroup")
+    cn_group_class.predicateForGroupsWithIdentifiers_.return_value = "GP"
+    fake_contacts.CNGroup = cn_group_class  # type: ignore[attr-defined]
+
+    cn_store_class = MagicMock(name="CNContactStore")
+    store_instance = MagicMock(name="store_instance")
+
+    def _unified_lookup(
+        ident: str, _keys: Any, _err: Any
+    ) -> tuple[Any, Any]:
+        if fetched_contacts is None:
+            return (None, MagicMock(name="NSError(no_lookup_table)"))
+        c = fetched_contacts.get(ident)
+        if c is None:
+            return (None, MagicMock(name="NSError(not_found)"))
+        return (c, None)
+
+    store_instance.unifiedContactWithIdentifier_keysToFetch_error_.side_effect = (
+        _unified_lookup
+    )
+    if group_results is None:
+        store_instance.groupsMatchingPredicate_error_.return_value = (
+            [],
+            None,
+        )
+    else:
+        store_instance.groupsMatchingPredicate_error_.return_value = (
+            group_results,
+            None,
+        )
+    store_instance.executeSaveRequest_error_.return_value = (
+        save_succeeds,
+        fake_save_error,
+    )
+    cn_store_class.alloc.return_value.init.return_value = store_instance
+    fake_contacts.CNContactStore = cn_store_class  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "Contacts", fake_contacts)
+    return store_instance, cn_vcard_class, save_request_instance, cn_save_request_class
+
+
+# ----- _run_cn_export_vcard -------------------------------------------------
+
+
+def test_export_vcard_single_happy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = MagicMock(name="CNContact(id-1)")
+    store, vcard, _save, _ = _install_fake_contacts_for_vcard(
+        monkeypatch,
+        fetched_contacts={"id-1": fake},
+        export_data=b"BEGIN:VCARD\nVERSION:3.0\nEND:VCARD\n",
+    )
+    connector = ContactsConnector()
+    out = connector._run_cn_export_vcard(["id-1"])
+    assert out == "BEGIN:VCARD\nVERSION:3.0\nEND:VCARD\n"
+    vcard.dataWithContacts_error_.assert_called_once_with([fake], None)
+
+
+def test_export_vcard_multi_preserves_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a = MagicMock(name="CNContact(a)")
+    b = MagicMock(name="CNContact(b)")
+    store, vcard, _save, _ = _install_fake_contacts_for_vcard(
+        monkeypatch,
+        fetched_contacts={"a": a, "b": b},
+        export_data=b"BEGIN:VCARD\n...two contacts...\nEND:VCARD\n",
+    )
+    connector = ContactsConnector()
+    out = connector._run_cn_export_vcard(["a", "b"])
+    assert "two contacts" in out
+    # Argument list passed to dataWithContacts is in input order.
+    call_args = vcard.dataWithContacts_error_.call_args.args
+    assert call_args[0] == [a, b]
+
+
+def test_export_vcard_uses_descriptor_for_required_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = MagicMock(name="CNContact")
+    store, vcard, _save, _ = _install_fake_contacts_for_vcard(
+        monkeypatch,
+        fetched_contacts={"id-1": fake},
+        export_data=b"x",
+    )
+    connector = ContactsConnector()
+    connector._run_cn_export_vcard(["id-1"])
+    # Each per-id lookup uses the [descriptor] keys list.
+    call_args = (
+        store.unifiedContactWithIdentifier_keysToFetch_error_.call_args.args
+    )
+    assert call_args[0] == "id-1"
+    assert call_args[1] == ["VCARD_DESCRIPTOR"]
+
+
+def test_export_vcard_first_miss_aborts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First missing id raises before later fetches run."""
+    a = MagicMock(name="CNContact(a)")
+    store, vcard, _save, _ = _install_fake_contacts_for_vcard(
+        monkeypatch,
+        fetched_contacts={"a": a, "missing": None, "c": MagicMock()},
+        export_data=b"x",
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsNotFoundError) as exc_info:
+        connector._run_cn_export_vcard(["a", "missing", "c"])
+    assert "missing" in str(exc_info.value)
+    # Serialization never reached.
+    vcard.dataWithContacts_error_.assert_not_called()
+
+
+def test_export_vcard_serialization_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = MagicMock(name="CNContact")
+    fake_err = MagicMock(name="NSError")
+    fake_err.__str__.return_value = "ser-boom"
+    _install_fake_contacts_for_vcard(
+        monkeypatch,
+        fetched_contacts={"id-1": fake},
+        export_data=None,
+        export_error=fake_err,
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_export_vcard(["id-1"])
+    assert "ser-boom" in str(exc_info.value)
+
+
+# ----- _run_cn_import_vcard ------------------------------------------------
+
+
+def _make_parsed_contact(label: str, new_id: str) -> MagicMock:
+    parsed = MagicMock(name=f"CNContact(parsed-{label})")
+    mutable = MagicMock(name=f"CNMutableContact(parsed-{label})")
+    mutable.identifier.return_value = new_id
+    parsed.mutableCopy.return_value = mutable
+    return parsed
+
+
+def test_import_vcard_single_happy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed = _make_parsed_contact("solo", "NEW-1")
+    store, vcard, save_req, _ = _install_fake_contacts_for_vcard(
+        monkeypatch, parsed_contacts=[parsed]
+    )
+    connector = ContactsConnector()
+    ids = connector._run_cn_import_vcard("BEGIN:VCARD...", group_identifier=None)
+    assert ids == ["NEW-1"]
+    save_req.addContact_toContainerWithIdentifier_.assert_called_once()
+    save_req.addMember_toGroup_.assert_not_called()
+
+
+def test_import_vcard_multi_preserves_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed_a = _make_parsed_contact("a", "NEW-A")
+    parsed_b = _make_parsed_contact("b", "NEW-B")
+    store, vcard, save_req, _ = _install_fake_contacts_for_vcard(
+        monkeypatch, parsed_contacts=[parsed_a, parsed_b]
+    )
+    connector = ContactsConnector()
+    ids = connector._run_cn_import_vcard("two-vcards", group_identifier=None)
+    assert ids == ["NEW-A", "NEW-B"]
+    assert save_req.addContact_toContainerWithIdentifier_.call_count == 2
+
+
+def test_import_vcard_parse_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_err = MagicMock(name="NSError")
+    fake_err.__str__.return_value = "bad-input"
+    _install_fake_contacts_for_vcard(
+        monkeypatch, parsed_contacts=None, parse_error=fake_err
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_import_vcard("garbage", group_identifier=None)
+    assert "vCard parse failed" in str(exc_info.value)
+    assert "bad-input" in str(exc_info.value)
+
+
+def test_import_vcard_empty_parse_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apple sometimes returns an empty list for syntactically valid but
+    semantically empty input. Treat as parse failure."""
+    _install_fake_contacts_for_vcard(monkeypatch, parsed_contacts=[])
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_import_vcard("BEGIN:VCARD", group_identifier=None)
+    assert "No vCards found" in str(exc_info.value)
+
+
+def test_import_vcard_group_not_found_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed = _make_parsed_contact("x", "NEW-1")
+    store, _vcard, save_req, _ = _install_fake_contacts_for_vcard(
+        monkeypatch, parsed_contacts=[parsed], group_results=[]
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsNotFoundError) as exc_info:
+        connector._run_cn_import_vcard(
+            "BEGIN:VCARD", group_identifier="BAD-GROUP"
+        )
+    assert "Group not found" in str(exc_info.value)
+    # Save never invoked.
+    store.executeSaveRequest_error_.assert_not_called()
+
+
+def test_import_vcard_with_group_adds_membership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed = _make_parsed_contact("x", "NEW-1")
+    fake_group = MagicMock(name="CNGroup_instance")
+    store, _vcard, save_req, _ = _install_fake_contacts_for_vcard(
+        monkeypatch,
+        parsed_contacts=[parsed],
+        group_results=[fake_group],
+    )
+    connector = ContactsConnector()
+    ids = connector._run_cn_import_vcard(
+        "BEGIN:VCARD", group_identifier="GROUP-1"
+    )
+    assert ids == ["NEW-1"]
+    save_req.addMember_toGroup_.assert_called_once()
+    args = save_req.addMember_toGroup_.call_args.args
+    assert args[1] is fake_group
+
+
+def test_import_vcard_save_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed = _make_parsed_contact("x", "NEW-1")
+    fake_err = MagicMock(name="NSError")
+    fake_err.__str__.return_value = "save-boom"
+    _install_fake_contacts_for_vcard(
+        monkeypatch,
+        parsed_contacts=[parsed],
+        save_succeeds=False,
+        fake_save_error=fake_err,
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_import_vcard("BEGIN:VCARD", group_identifier=None)
+    assert "CN save failed" in str(exc_info.value)
+    assert "save-boom" in str(exc_info.value)

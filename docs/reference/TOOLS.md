@@ -3,7 +3,7 @@
 Reference for every MCP tool the apple-contacts-mcp server exposes.
 
 **Version:** v0.1.0 (tracks the package version)
-**Tools:** 13
+**Tools:** 15
 
 The source-of-truth for tool behavior is the docstrings in
 [src/apple_contacts_mcp/server.py](../../src/apple_contacts_mcp/server.py)
@@ -618,6 +618,87 @@ def remove_contact_from_group(
 - **Destructive (test-mode gated):** removes the membership edge only. The contact and the group themselves are untouched.
 - **AppleScript fallback:** Apple's `CNSaveRequest.removeMember:fromGroup:` silently no-ops despite reporting success, so the connector routes through `osascript` (`remove p from g` followed by `save`) instead. Empirically discovered during #18 and locked in by the integration test rig. Apple's add path works fine; only the remove path is asymmetric.
 - Pre-flights existence via the same fetch helper used by `add_contact_to_group`, so `not_found` is dispatched before the AppleScript runs.
+
+---
+
+### export_vcard
+
+Export one or more contacts as a single vCard 3.0 payload.
+
+```python
+def export_vcard(identifiers: list[str]) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `identifiers` | list[str] | — | Non-empty list of contact CN identifiers (the suffixed `<UUID>:ABPerson` form). Single-contact callers pass `[id]`. |
+
+**Returns:**
+
+```jsonc
+{
+  "success": true,
+  "vcard": "BEGIN:VCARD\nVERSION:3.0\nPRODID:-//Apple Inc.//macOS …\nN:Smith;John;;;\nFN:John Smith\nTEL;type=CELL;type=VOICE;type=pref:+15551234567\nEND:VCARD\n",
+  "count": 1,
+  "notes": [
+    "NOTE field is omitted (entitlement-gated). Use read_note() and merge separately if needed.",
+    "Year-less birthdays use Apple's X-APPLE-OMIT-YEAR=1604 hack; non-Apple consumers see 1604 as the literal year."
+  ]
+}
+```
+
+**Error types:** `validation_error`, `authorization_denied`, `not_found`, `unknown`.
+
+**Notes:**
+- **vCard 3.0 verbatim.** Apple's `CNContactVCardSerialization` emits 3.0 only; we pass it through unchanged. See [`docs/research/vcard-version-decision.md`](../research/vcard-version-decision.md) for the rationale and the full enumeration of Apple's specific quirks.
+- **Atomic.** The first missing identifier aborts the call before serialization runs — the response is `not_found` with the offending id named in the `error` text.
+- **Limitations are echoed in the response `notes` list** (rather than only in docs) so callers see them at runtime. The two limitations to flag for users:
+  1. **NOTE field omitted** (entitlement-gated; use [`read_note`](#read_note) and merge separately).
+  2. **Year-less birthdays corrupt to "1604"** for non-Apple consumers (Apple↔Apple round-trip preserves the year-less semantic via the `X-APPLE-OMIT-YEAR` marker).
+- No vCard 4.0 emit; vCard 4.0 input is accepted by [`import_vcard`](#import_vcard).
+
+---
+
+### import_vcard
+
+Parse a vCard payload and persist as new contacts.
+
+```python
+def import_vcard(
+    vcard_text: str,
+    group_identifier: str | None = None,
+) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `vcard_text` | str | — | The vCard text. Non-empty after stripping. May contain one or more `BEGIN:VCARD…END:VCARD` blocks. Both vCard 3.0 and 4.0 input are accepted. |
+| `group_identifier` | str \| None | None | Optional. If provided, every imported contact is added to the group atomically. **Required** in test mode for the safety gate (must match `CONTACTS_TEST_GROUP`). |
+
+**Returns:**
+
+```jsonc
+{
+  "success": true,
+  "identifiers": ["ABCD-…:ABPerson", "EFGH-…:ABPerson"],
+  "count": 2,
+  "group_id": "WXYZ-…:ABGroup"
+}
+```
+
+`group_id` is `null` when no group was specified. `identifiers` is in input order.
+
+**Error types:** `validation_error`, `safety_violation`, `authorization_denied`, `not_found`, `unknown`.
+
+**Notes:**
+- **Destructive (test-mode gated):** creates new contacts. Test-mode posture matches `create_contact` (gated to `CONTACTS_TEST_GROUP` when test mode is on; freely allowed outside test mode).
+- **Atomic.** Parse failure, empty input, group-not-found, or save failure aborts the whole call. A multi-contact vCard is committed as one unit.
+- **Malformed input dispatches `validation_error`** (not `unknown`) — Apple's parser is the authority on validity, but the caller is responsible for handing us well-formed text. The `error` string preserves Apple's parser message for debuggability.
+- vCard 4.0 input is accepted (Apple parses both); after import, our internal representation is the unified Apple model regardless of input version.
 
 ---
 
