@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.1] - 2026-05-09
+## [0.2.1] - 2026-05-10
 
 Patch release covering release-gate follow-ups from v0.2.0. One breaking shape change (`create_contact` `group_id`) and one infrastructure fix (`check_complexity.sh` actually enforces the documented threshold now).
 
