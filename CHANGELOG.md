@@ -7,9 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-09
+
+Patch release covering release-gate follow-ups from v0.2.0. One breaking shape change (`create_contact` `group_id`) and one infrastructure fix (`check_complexity.sh` actually enforces the documented threshold now).
+
 ### Changed
 
 - `create_contact` success response: `group_id` is now always present, `null` when `group_identifier` was not supplied. Aligns with `import_vcard`'s existing shape so callers can use one detection idiom (`response["group_id"] is not None`) across both tools. **Breaking shape change** vs v0.2.0; callers using `"group_id" in response` to detect group assignment must switch (#62).
+- `_validate_create_contact_input` and `_validate_update_contact_input` refactored — duplicated per-field-type checks (phones / emails / urls / postal addresses / birthday) extracted into shared module-level helpers (`_validate_phones`, `_validate_emails`, `_validate_urls`, `_validate_postal_addresses`, `_validate_birthday`, `_validate_labeled_value_fields`). Behavior preserved; both outer validators drop from CC=32/29 to single digits, and ~50 lines of duplicated body collapse into one place (#61).
+
+### Fixed
+
+- `scripts/check_complexity.sh` had been silently failing on every PR since #53 introduced a Python 3.10 `match` statement. Two underlying bugs: (1) the script invoked whatever `radon` was on `PATH`, which on developer machines often resolved to a system-Python-3.9 install that can't parse `match` — switch to `uv run radon` so it always uses the project's pinned Python (3.10+); (2) the gate used `radon -n F` (CC≥41) despite documenting `THRESHOLD=20` — switch to `-n A` and apply the documented threshold honestly. Also drop `continue-on-error: true` from `.github/workflows/test.yml` so future regressions actually fail CI (#61).
+
+### Documentation
+
+- TOOLS.md gained a top-of-file **Response-shape convention** note: optional id-echo keys (`group_id`, etc.) in success responses are always present, set to `null` when input was absent. Single source of truth for all current and future tools (#62).
 
 ## [0.2.0] - 2026-05-09
 
