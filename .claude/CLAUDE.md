@@ -1,9 +1,11 @@
 # Apple Contacts MCP Server
 
-**Version:** v0.2.0
+**Version:** v0.2.1
 
-v0.2.0 extends the v0.1.0 core with field-scoped search, group read/write,
-note read/write (AppleScript fallback), and vCard import/export. See
+v0.2.1 is a patch release covering release-gate follow-ups from v0.2.0:
+fixes the `check_complexity.sh` script and refactors the validators it
+flagged, and aligns `create_contact`'s success response with `import_vcard`
+on `group_id` shape (always present, `null` when no group). See
 [docs/reference/TOOLS.md](../docs/reference/TOOLS.md) for the API surface
 and [CHANGELOG.md](../CHANGELOG.md) for release notes.
 
