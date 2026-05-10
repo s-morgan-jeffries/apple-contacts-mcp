@@ -31,7 +31,6 @@ jobs:
 
       - name: Complexity check
         run: ./scripts/check_complexity.sh
-        continue-on-error: true
 
       - name: Version sync check
         run: ./scripts/check_version_sync.sh

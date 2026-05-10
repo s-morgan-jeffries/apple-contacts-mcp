@@ -436,6 +436,82 @@ def get_contacts_in_group(identifier: str) -> dict[str, Any]:
     }
 
 
+def _validate_phones(
+    phones: list[dict[str, str]] | None,
+) -> dict[str, Any] | None:
+    for i, p in enumerate(phones or []):
+        if not (p.get("value") or "").strip():
+            return _validation_error(f"phones[{i}].value must be non-empty")
+    return None
+
+
+def _validate_emails(
+    emails: list[dict[str, str]] | None,
+) -> dict[str, Any] | None:
+    for i, e in enumerate(emails or []):
+        v = (e.get("value") or "").strip()
+        if not v:
+            return _validation_error(f"emails[{i}].value must be non-empty")
+        if "@" not in v:
+            return _validation_error(f"emails[{i}].value must contain '@'")
+    return None
+
+
+def _validate_urls(
+    urls: list[dict[str, str]] | None,
+) -> dict[str, Any] | None:
+    for i, u in enumerate(urls or []):
+        if not (u.get("value") or "").strip():
+            return _validation_error(f"urls[{i}].value must be non-empty")
+    return None
+
+
+def _validate_postal_addresses(
+    addrs: list[dict[str, str]] | None,
+) -> dict[str, Any] | None:
+    for i, a in enumerate(addrs or []):
+        if not any(
+            (a.get(k) or "").strip()
+            for k in ("street", "city", "state", "postal_code", "country")
+        ):
+            return _validation_error(
+                f"postal_addresses[{i}] must set at least one of "
+                f"street/city/state/postal_code/country"
+            )
+    return None
+
+
+def _validate_birthday(
+    bday: dict[str, int] | None,
+) -> dict[str, Any] | None:
+    if bday is None:
+        return None
+    m = bday.get("month")
+    d = bday.get("day")
+    y = bday.get("year")
+    if m is not None and not (1 <= m <= 12):
+        return _validation_error("birthday.month must be 1-12")
+    if d is not None and not (1 <= d <= 31):
+        return _validation_error("birthday.day must be 1-31")
+    if y is not None and y <= 0:
+        return _validation_error("birthday.year must be > 0 if set")
+    return None
+
+
+def _validate_labeled_value_fields(
+    fields: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Run the per-field-type validators shared by create_contact and
+    update_contact. First failure short-circuits."""
+    return (
+        _validate_phones(fields.get("phones"))
+        or _validate_emails(fields.get("emails"))
+        or _validate_urls(fields.get("urls"))
+        or _validate_postal_addresses(fields.get("postal_addresses"))
+        or _validate_birthday(fields.get("birthday"))
+    )
+
+
 def _validate_create_contact_input(
     fields: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -450,45 +526,7 @@ def _validate_create_contact_input(
             "At least one of given_name, family_name, or organization "
             "must be set."
         )
-
-    for i, p in enumerate(fields.get("phones") or []):
-        if not (p.get("value") or "").strip():
-            return _validation_error(f"phones[{i}].value must be non-empty")
-
-    for i, e in enumerate(fields.get("emails") or []):
-        v = (e.get("value") or "").strip()
-        if not v:
-            return _validation_error(f"emails[{i}].value must be non-empty")
-        if "@" not in v:
-            return _validation_error(f"emails[{i}].value must contain '@'")
-
-    for i, u in enumerate(fields.get("urls") or []):
-        if not (u.get("value") or "").strip():
-            return _validation_error(f"urls[{i}].value must be non-empty")
-
-    for i, a in enumerate(fields.get("postal_addresses") or []):
-        if not any(
-            (a.get(k) or "").strip()
-            for k in ("street", "city", "state", "postal_code", "country")
-        ):
-            return _validation_error(
-                f"postal_addresses[{i}] must set at least one of "
-                f"street/city/state/postal_code/country"
-            )
-
-    bday = fields.get("birthday")
-    if bday is not None:
-        m = bday.get("month")
-        d = bday.get("day")
-        y = bday.get("year")
-        if m is not None and not (1 <= m <= 12):
-            return _validation_error("birthday.month must be 1-12")
-        if d is not None and not (1 <= d <= 31):
-            return _validation_error("birthday.day must be 1-31")
-        if y is not None and y <= 0:
-            return _validation_error("birthday.year must be > 0 if set")
-
-    return None
+    return _validate_labeled_value_fields(fields)
 
 
 def _validation_error(msg: str) -> dict[str, Any]:
@@ -622,50 +660,11 @@ def _validate_update_contact_input(
     dict otherwise."""
     if not identifier or not identifier.strip():
         return _validation_error("identifier must be a non-empty string")
-
     if len(fields) == 0:
         return _validation_error(
             "At least one field must be supplied to update."
         )
-
-    for i, p in enumerate(fields.get("phones") or []):
-        if not (p.get("value") or "").strip():
-            return _validation_error(f"phones[{i}].value must be non-empty")
-
-    for i, e in enumerate(fields.get("emails") or []):
-        v = (e.get("value") or "").strip()
-        if not v:
-            return _validation_error(f"emails[{i}].value must be non-empty")
-        if "@" not in v:
-            return _validation_error(f"emails[{i}].value must contain '@'")
-
-    for i, u in enumerate(fields.get("urls") or []):
-        if not (u.get("value") or "").strip():
-            return _validation_error(f"urls[{i}].value must be non-empty")
-
-    for i, a in enumerate(fields.get("postal_addresses") or []):
-        if not any(
-            (a.get(k) or "").strip()
-            for k in ("street", "city", "state", "postal_code", "country")
-        ):
-            return _validation_error(
-                f"postal_addresses[{i}] must set at least one of "
-                f"street/city/state/postal_code/country"
-            )
-
-    bday = fields.get("birthday")
-    if bday is not None:
-        m = bday.get("month")
-        d = bday.get("day")
-        y = bday.get("year")
-        if m is not None and not (1 <= m <= 12):
-            return _validation_error("birthday.month must be 1-12")
-        if d is not None and not (1 <= d <= 31):
-            return _validation_error("birthday.day must be 1-31")
-        if y is not None and y <= 0:
-            return _validation_error("birthday.year must be > 0 if set")
-
-    return None
+    return _validate_labeled_value_fields(fields)
 
 
 @mcp.tool()
