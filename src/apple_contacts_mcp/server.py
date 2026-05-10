@@ -586,7 +586,7 @@ def create_contact(
 
     Returns:
         On success: ``{"success": True, "identifier": "...",
-        "group_id": "..."}``. ``group_id`` is omitted when
+        "group_id": ...}``. ``group_id`` is ``null`` when
         ``group_identifier`` was None.
         On bad input: ``{"success": False, "error_type":
         "validation_error", "error": ...}``.
@@ -647,10 +647,11 @@ def create_contact(
             "error_type": "unknown",
         }
 
-    response: dict[str, Any] = {"success": True, "identifier": identifier}
-    if group_identifier is not None:
-        response["group_id"] = group_identifier
-    return response
+    return {
+        "success": True,
+        "identifier": identifier,
+        "group_id": group_identifier,
+    }
 
 
 def _validate_update_contact_input(

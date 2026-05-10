@@ -29,6 +29,11 @@ When you add a new `@mcp.tool()`, mirror this layout. Group tools
 under the version they shipped in (`## Phase 1 Tools (v0.1.0)`,
 `## Phase 2 Tools (v0.2.0)`, …).
 
+**Response-shape convention.** Optional id-echo keys (`group_id`, etc.) in
+success responses are **always present**, set to `null` when the
+corresponding input was not supplied. Callers should detect "was a group
+assigned?" via `response["group_id"] is not None`, not via key presence.
+
 ---
 
 ## Phase 1 Tools (v0.1.0)
@@ -296,7 +301,7 @@ At least one of `given_name`, `family_name`, or `organization` must be non-empty
 
 ```jsonc
 // Without group
-{"success": true, "identifier": "ABCD-…"}
+{"success": true, "identifier": "ABCD-…", "group_id": null}
 
 // With group
 {"success": true, "identifier": "ABCD-…", "group_id": "GROUP-XYZ"}

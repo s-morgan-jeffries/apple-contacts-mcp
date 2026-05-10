@@ -667,12 +667,16 @@ class TestCreateContactTestModeSafety:
 
 
 class TestCreateContactHappyPath:
-    def test_minimal_returns_identifier_no_group(self) -> None:
+    def test_minimal_returns_identifier_with_null_group_id(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
             mock_connector._run_cn_authorization_status.return_value = "authorized"
             mock_connector._run_cn_create_contact.return_value = "NEW-ID-1"
             result = create_contact(given_name="Alice")
-        assert result == {"success": True, "identifier": "NEW-ID-1"}
+        assert result == {
+            "success": True,
+            "identifier": "NEW-ID-1",
+            "group_id": None,
+        }
         mock_connector._run_cn_create_contact.assert_called_once()
         kwargs = mock_connector._run_cn_create_contact.call_args.kwargs
         assert kwargs["group_identifier"] is None
@@ -690,6 +694,13 @@ class TestCreateContactHappyPath:
             "identifier": "NEW-ID-2",
             "group_id": "GROUP-XYZ",
         }
+
+    def test_response_keys_are_minimal(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_contact.return_value = "NEW"
+            result = create_contact(given_name="Alice")
+        assert set(result.keys()) == {"success", "identifier", "group_id"}
 
     def test_full_field_set_passes_through_to_connector(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
