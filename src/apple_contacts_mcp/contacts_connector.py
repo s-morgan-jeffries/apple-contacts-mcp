@@ -718,36 +718,35 @@ class ContactsConnector:
             CNContactFamilyNameKey,
             CNContactOrganizationNameKey,
         ]
-        match field:
-            case "name":
-                pred = CNContact.predicateForContactsMatchingName_(value)
-            case "phone":
-                from Contacts import CNPhoneNumber
+        if field == "name":
+            pred = CNContact.predicateForContactsMatchingName_(value)
+        elif field == "phone":
+            from Contacts import CNPhoneNumber
 
-                # Apple's phone predicate silently returns zero results if
-                # CNContactPhoneNumbersKey isn't in keysToFetch — the
-                # unification step skips contacts whose matching field
-                # wasn't requested. Empirically verified; not documented.
-                keys.append(CNContactPhoneNumbersKey)
-                pred = CNContact.predicateForContactsMatchingPhoneNumber_(
-                    CNPhoneNumber.phoneNumberWithStringValue_(value)
-                )
-            case "email":
-                # Email predicate currently matches without
-                # CNContactEmailAddressesKey, but include it for symmetry
-                # with phone in case Apple tightens the unification step.
-                keys.append(CNContactEmailAddressesKey)
-                pred = CNContact.predicateForContactsMatchingEmailAddress_(
-                    value
-                )
-            case "organization":
-                from Foundation import NSPredicate
+            # Apple's phone predicate silently returns zero results if
+            # CNContactPhoneNumbersKey isn't in keysToFetch — the
+            # unification step skips contacts whose matching field
+            # wasn't requested. Empirically verified; not documented.
+            keys.append(CNContactPhoneNumbersKey)
+            pred = CNContact.predicateForContactsMatchingPhoneNumber_(
+                CNPhoneNumber.phoneNumberWithStringValue_(value)
+            )
+        elif field == "email":
+            # Email predicate currently matches without
+            # CNContactEmailAddressesKey, but include it for symmetry
+            # with phone in case Apple tightens the unification step.
+            keys.append(CNContactEmailAddressesKey)
+            pred = CNContact.predicateForContactsMatchingEmailAddress_(
+                value
+            )
+        elif field == "organization":
+            from Foundation import NSPredicate
 
-                pred = NSPredicate.predicateWithFormat_(
-                    "organizationName CONTAINS[cd] %@", value
-                )
-            case _:
-                raise ContactsError(f"Unknown search field: {field!r}")
+            pred = NSPredicate.predicateWithFormat_(
+                "organizationName CONTAINS[cd] %@", value
+            )
+        else:
+            raise ContactsError(f"Unknown search field: {field!r}")
 
         store = self._get_store()
         results, err = store.unifiedContactsMatchingPredicate_keysToFetch_error_(
