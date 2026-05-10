@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `create_contact` success response: `group_id` is now always present, `null` when `group_identifier` was not supplied. Aligns with `import_vcard`'s existing shape so callers can use one detection idiom (`response["group_id"] is not None`) across both tools. **Breaking shape change** vs v0.2.0; callers using `"group_id" in response` to detect group assignment must switch (#62).
+
 ## [0.2.0] - 2026-05-09
 
 Phase 2 release. Eight new tools spanning field-scoped search, group read/write, note read/write (AppleScript fallback), and vCard 3.0 import/export. Two breaking input-shape changes vs v0.1.0 (`search_contacts` predicates, `label` field on labeled values).
