@@ -305,6 +305,7 @@ This maps directly onto the BOOTSTRAP-defined milestones:
    - Groups are owned by exactly one container (probed via `predicateForContainerOfGroupWithIdentifier:`). All 8 groups in the test rig live in iCloud; the Gmail container has none. **CardDAV groups are provider-dependent** — Google CardDAV may or may not expose groups. Worth re-probing with a populated Google Contacts.
    - **AppleScript is container-blind**: no `account` class, `name of every account` errors with `-2741`. AppleScript fallback paths (notes, mod-dates) operate on the unified view; they identify contacts by UUID, so cross-container ambiguity isn't a problem in practice.
    - Open empirical follow-ups: (a) write a contact into the Gmail container and verify round-trip; (b) test with a populated Google Contacts to see whether CardDAV groups surface; (c) re-probe with Exchange/On-My-Mac if either becomes available, since `CNContainerTypeExchange` (2) and `CNContainerTypeLocal` (1) are still untested.
+   - **Resolved 2026-05-10 (Q8a): see [multi-container-write-decision.md](./multi-container-write-decision.md).** `addContact:toContainerWithIdentifier:<non-default-uuid>` honors the explicit identifier; the sentinel contact landed in Gmail (1 match) and not in iCloud (0 matches). Unblocks #26. Q8b and Q8c remain open.
 
 ## 7. Decision
 
