@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 from typing import Any, cast
 
@@ -10,6 +12,7 @@ from fastmcp import FastMCP
 from .contacts_connector import ContactsConnector, SearchField
 from .exceptions import ContactsError, ContactsNotFoundError, ContactsTimeoutError
 from .security import check_test_mode_safety, require_test_mode_for
+from .utils import detect_image_format
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1161,6 +1164,154 @@ def write_note(
         return {
             "success": False,
             "error": f"write_note failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {"success": True, "identifier": identifier}
+
+
+@mcp.tool()
+def read_photo(identifier: str) -> dict[str, Any]:
+    """Read a contact's photo. Returns base64-encoded bytes + detected format.
+
+    The photo is transported as base64-encoded text — JSON-safe over the
+    MCP wire. Callers decode via ``base64.b64decode(image_data)``.
+
+    The contact-exists-but-no-photo case is a SUCCESS (``image_data:
+    null``, ``format: null``, ``size_bytes: 0``) — distinct from
+    ``not_found``, which means the identifier didn't match any contact.
+
+    Args:
+        identifier: The contact's CN identifier.
+
+    Returns:
+        On success (photo set): ``{"success": True, "identifier": ...,
+        "image_data": "<base64>", "format": "jpeg" | "png" | "heic" |
+        "gif" | "unknown", "size_bytes": <int>}``.
+        On success (no photo set): ``{"success": True, "identifier":
+        ..., "image_data": null, "format": null, "size_bytes": 0}``.
+        On bad input: ``validation_error``.
+        On TCC denial: ``authorization_denied``.
+        On unknown identifier: ``not_found``.
+        On unexpected failure: ``unknown``.
+    """
+    if not identifier or not identifier.strip():
+        return _validation_error("identifier must be a non-empty string")
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    try:
+        photo = connector._run_cn_read_photo(identifier)
+    except Exception as exc:
+        logger.error("read_photo failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"read_photo failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    if photo is None:
+        return {
+            "success": False,
+            "error": f"Contact not found: {identifier!r}",
+            "error_type": "not_found",
+        }
+
+    if not photo["available"]:
+        return {
+            "success": True,
+            "identifier": identifier,
+            "image_data": None,
+            "format": None,
+            "size_bytes": 0,
+        }
+
+    raw = photo["image_data"]
+    return {
+        "success": True,
+        "identifier": identifier,
+        "image_data": base64.b64encode(raw).decode("ascii"),
+        "format": detect_image_format(raw),
+        "size_bytes": len(raw),
+    }
+
+
+@mcp.tool()
+def write_photo(
+    identifier: str,
+    image_data: str | None,
+    group_identifier: str | None = None,
+) -> dict[str, Any]:
+    """Set or clear a contact's photo.
+
+    ``image_data`` is **base64-encoded** input — JSON-safe transport for
+    binary. ``image_data=None`` clears the photo. Apple is the authority
+    on accepted formats; bytes that Apple rejects surface as ``unknown``
+    rather than ``validation_error``.
+
+    Destructive (test-mode gated): in test mode,
+    ``group_identifier`` must match ``CONTACTS_TEST_GROUP``.
+
+    Args:
+        identifier: The contact's CN identifier.
+        image_data: Base64-encoded image bytes (JPEG/PNG/HEIC). ``None``
+            clears the existing photo.
+        group_identifier: Test-mode safety assertion. Required in test
+            mode; ignored otherwise.
+
+    Returns:
+        On success: ``{"success": True, "identifier": identifier}``.
+        On bad input (empty identifier or bad base64): ``validation_error``.
+        On TCC denial: ``authorization_denied``.
+        On test-mode mismatch: ``safety_violation``.
+        On unknown identifier: ``not_found``.
+        On CN save failure: ``unknown``.
+    """
+    if not identifier or not identifier.strip():
+        return _validation_error("identifier must be a non-empty string")
+
+    decoded: bytes | None
+    if image_data is None:
+        decoded = None
+    else:
+        if not isinstance(image_data, str):
+            return _validation_error(
+                "image_data must be a base64-encoded string or null"
+            )
+        try:
+            decoded = base64.b64decode(image_data, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            return _validation_error(
+                f"image_data is not valid base64: {exc}"
+            )
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    safety_err = check_test_mode_safety(
+        "write_photo", group=group_identifier
+    )
+    if safety_err is not None:
+        return safety_err
+
+    try:
+        connector._run_cn_write_photo(
+            identifier=identifier, image_data=decoded
+        )
+    except ContactsNotFoundError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": "not_found",
+        }
+    except Exception as exc:
+        logger.error("write_photo failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"write_photo failed: {exc}",
             "error_type": "unknown",
         }
 

@@ -1751,6 +1751,180 @@ def test_delete_contact_save_failure_raises(
 
 
 # ---------------------------------------------------------------------------
+# _run_cn_read_photo / _run_cn_write_photo
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_contacts_for_photo(
+    monkeypatch: pytest.MonkeyPatch,
+    fetched_contact: MagicMock | None = None,
+    save_succeeds: bool = True,
+    fake_save_error: Any | None = None,
+) -> tuple[MagicMock, MagicMock, MagicMock]:
+    """Install a fake `Contacts` module covering read/write photo paths.
+
+    Returns (store_instance, save_request_instance, mutable_instance).
+    For read tests, mutable_instance is unused. For write tests with a
+    real fetched_contact, mutable_instance is what mutableCopy() returns;
+    callers can inspect setImageData_ calls on it.
+    """
+    fake_contacts = types.ModuleType("Contacts")
+    fake_contacts.CNContactImageDataKey = "CNContactImageDataKey"  # type: ignore[attr-defined]
+    fake_contacts.CNContactImageDataAvailableKey = (  # type: ignore[attr-defined]
+        "CNContactImageDataAvailableKey"
+    )
+
+    save_req = MagicMock(name="save_request")
+    cn_save_request_class = MagicMock(name="CNSaveRequest")
+    cn_save_request_class.alloc.return_value.init.return_value = save_req
+    fake_contacts.CNSaveRequest = cn_save_request_class  # type: ignore[attr-defined]
+
+    store_instance = MagicMock(name="store_instance")
+    mutable_instance = MagicMock(name="mutable_instance")
+    if fetched_contact is None:
+        store_instance.unifiedContactWithIdentifier_keysToFetch_error_.return_value = (
+            None,
+            MagicMock(name="NSError(not_found)"),
+        )
+    else:
+        store_instance.unifiedContactWithIdentifier_keysToFetch_error_.return_value = (
+            fetched_contact,
+            None,
+        )
+        fetched_contact.mutableCopy.return_value = mutable_instance
+    store_instance.executeSaveRequest_error_.return_value = (
+        save_succeeds,
+        fake_save_error,
+    )
+
+    cn_store_class = MagicMock(name="CNContactStore")
+    cn_store_class.alloc.return_value.init.return_value = store_instance
+    fake_contacts.CNContactStore = cn_store_class  # type: ignore[attr-defined]
+    fake_contacts.CNEntityTypeContacts = 0  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "Contacts", fake_contacts)
+    return store_instance, save_req, mutable_instance
+
+
+# ----- _run_cn_read_photo -----------------------------------------------------
+
+
+def test_read_photo_missing_contact_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_contacts_for_photo(monkeypatch, fetched_contact=None)
+    connector = ContactsConnector()
+    assert connector._run_cn_read_photo("MISSING") is None
+
+
+def test_read_photo_returns_empty_bytes_when_no_photo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """imageDataAvailable() is False → contract returns {available: False,
+    image_data: b''} WITHOUT calling imageData()."""
+    fetched = MagicMock(name="fetched")
+    fetched.imageDataAvailable.return_value = False
+    _install_fake_contacts_for_photo(monkeypatch, fetched_contact=fetched)
+    connector = ContactsConnector()
+    result = connector._run_cn_read_photo("ABCD")
+    assert result == {"available": False, "image_data": b""}
+    fetched.imageData.assert_not_called()
+
+
+def test_read_photo_returns_bytes_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="fetched")
+    fetched.imageDataAvailable.return_value = True
+    fetched.imageData.return_value = b"\xff\xd8\xfffake-jpeg"
+    _install_fake_contacts_for_photo(monkeypatch, fetched_contact=fetched)
+    connector = ContactsConnector()
+    result = connector._run_cn_read_photo("ABCD")
+    assert result == {
+        "available": True,
+        "image_data": b"\xff\xd8\xfffake-jpeg",
+    }
+
+
+def test_read_photo_handles_falsy_imagedata_defensively(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If imageDataAvailable() lies (True) but imageData() returns None,
+    we don't crash; we return empty bytes."""
+    fetched = MagicMock(name="fetched")
+    fetched.imageDataAvailable.return_value = True
+    fetched.imageData.return_value = None
+    _install_fake_contacts_for_photo(monkeypatch, fetched_contact=fetched)
+    connector = ContactsConnector()
+    result = connector._run_cn_read_photo("ABCD")
+    assert result == {"available": True, "image_data": b""}
+
+
+# ----- _run_cn_write_photo ----------------------------------------------------
+
+
+def test_write_photo_raises_not_found_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, save_req, _ = _install_fake_contacts_for_photo(
+        monkeypatch, fetched_contact=None
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsNotFoundError):
+        connector._run_cn_write_photo("MISSING", b"x")
+    save_req.updateContact_.assert_not_called()
+    store.executeSaveRequest_error_.assert_not_called()
+
+
+def test_write_photo_happy_path_sets_image_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="fetched")
+    store, save_req, mutable = _install_fake_contacts_for_photo(
+        monkeypatch, fetched_contact=fetched
+    )
+    connector = ContactsConnector()
+    payload = b"\xff\xd8\xfffake-jpeg"
+    result = connector._run_cn_write_photo("ABCD", payload)
+    assert result == "ABCD"
+    mutable.setImageData_.assert_called_once_with(payload)
+    save_req.updateContact_.assert_called_once_with(mutable)
+    store.executeSaveRequest_error_.assert_called_once()
+
+
+def test_write_photo_clear_passes_none_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="fetched")
+    _, _, mutable = _install_fake_contacts_for_photo(
+        monkeypatch, fetched_contact=fetched
+    )
+    connector = ContactsConnector()
+    result = connector._run_cn_write_photo("ABCD", None)
+    assert result == "ABCD"
+    mutable.setImageData_.assert_called_once_with(None)
+
+
+def test_write_photo_save_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetched = MagicMock(name="fetched")
+    err = MagicMock(name="NSError(save)")
+    err.__str__.return_value = "photo boom"
+    _install_fake_contacts_for_photo(
+        monkeypatch,
+        fetched_contact=fetched,
+        save_succeeds=False,
+        fake_save_error=err,
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_write_photo("ABCD", b"x")
+    assert "CN photo write failed" in str(exc_info.value)
+    assert "photo boom" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
 # _run_cn_create_group / _run_cn_rename_group / _run_cn_delete_group
 # ---------------------------------------------------------------------------
 

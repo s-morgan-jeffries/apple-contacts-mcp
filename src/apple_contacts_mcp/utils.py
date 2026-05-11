@@ -35,6 +35,33 @@ _HUMAN_LABEL_TO_APPLE_TOKEN: dict[str, str] = {
 }
 
 
+_HEIC_FTYP_BRANDS: frozenset[bytes] = frozenset(
+    {b"heic", b"heix", b"heif", b"hevc", b"hevx", b"mif1", b"msf1"}
+)
+
+
+def detect_image_format(data: bytes) -> str:
+    """Identify an image format from its leading magic bytes.
+
+    Returns one of ``"jpeg"``, ``"png"``, ``"gif"``, ``"heic"``, or
+    ``"unknown"``. Pure function; no PyObjC dependency. Robust against
+    short / empty input — never raises.
+
+    ``"heic"`` covers the wider HEIF-family ISOBMFF brands Apple emits
+    (heic, heix, heif, hevc, hevx, mif1, msf1) — they're all "HEIF-flavored
+    bytes" from a caller's perspective.
+    """
+    if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if len(data) >= 4 and data[:4] == b"GIF8":
+        return "gif"
+    if len(data) >= 12 and data[4:8] == b"ftyp" and data[8:12] in _HEIC_FTYP_BRANDS:
+        return "heic"
+    return "unknown"
+
+
 def label_to_apple_token(label: str) -> str:
     """Translate a label input to the form Contacts.framework expects.
 
