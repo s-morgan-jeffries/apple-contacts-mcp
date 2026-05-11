@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `list_containers` — enumerate contact containers (accounts: iCloud, Gmail, Exchange, On-My-Mac). Returns `{id, name, type, is_default}` per entry, capped at 10. `type` is one of `"local"` / `"exchange"` / `"cardDAV"` (even iCloud reports as `cardDAV` — the sync protocol). `is_default` flags the container new contacts go into when `container_identifier` isn't specified (#26).
+- `create_contact` gained an optional `container_identifier` parameter — pass a container UUID from `list_containers` to write to a non-default account; default `None` keeps current iCloud-default behavior. Response now echoes both `group_id` and `container_id` (both `null` when input absent, per the v0.2.1 response-shape convention). Empirical basis: [`docs/research/multi-container-write-decision.md`](docs/research/multi-container-write-decision.md). **Non-breaking** for existing callers (#26).
+
 ## [0.2.1] - 2026-05-10
 
 Patch release covering release-gate follow-ups from v0.2.0. One breaking shape change (`create_contact` `group_id`) and one infrastructure fix (`check_complexity.sh` actually enforces the documented threshold now).

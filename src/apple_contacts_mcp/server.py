@@ -24,6 +24,7 @@ connector = ContactsConnector()
 _LIST_CONTACTS_MAX = 200
 _SEARCH_CONTACTS_MAX = 200
 _LIST_GROUPS_MAX = 200
+_LIST_CONTAINERS_MAX = 10
 
 
 _AUTH_REMEDIATION: dict[str, str] = {
@@ -339,6 +340,52 @@ def search_contacts(
 
 
 @mcp.tool()
+def list_containers() -> dict[str, Any]:
+    """List all contact containers (accounts).
+
+    A "container" in `Contacts.framework` is an account: iCloud, a Google
+    CardDAV account, Exchange, the legacy "On My Mac" local store, etc.
+    Each entry has ``id`` (the CN identifier), ``name`` (user-visible),
+    ``type`` (one of ``"local"``, ``"exchange"``, ``"cardDAV"``), and
+    ``is_default`` (True for the container new contacts go into when no
+    ``container_identifier`` is specified). Use the ``id`` with
+    ``create_contact(..., container_identifier=...)`` to target a
+    specific account.
+
+    Hard cap at 10 (containers per user are typically <5).
+
+    Returns:
+        On success: ``{"success": True, "containers": [...], "count": N,
+        "limit": 10}``. ``count == limit`` indicates the cap was hit.
+        On TCC denial: same shape as ``list_contacts`` (status,
+        remediation).
+        On unexpected failure: ``{"success": False, "error_type":
+        "unknown", "error": ...}``.
+    """
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    try:
+        containers = connector._run_cn_list_containers()
+    except Exception as exc:
+        logger.error("list_containers failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"list_containers failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    capped = containers[:_LIST_CONTAINERS_MAX]
+    return {
+        "success": True,
+        "containers": capped,
+        "count": len(capped),
+        "limit": _LIST_CONTAINERS_MAX,
+    }
+
+
+@mcp.tool()
 def list_groups() -> dict[str, Any]:
     """List all contact groups across all containers.
 
@@ -554,8 +601,9 @@ def create_contact(
     postal_addresses: list[dict[str, str]] | None = None,
     birthday: dict[str, int] | None = None,
     group_identifier: str | None = None,
+    container_identifier: str | None = None,
 ) -> dict[str, Any]:
-    """Create a new contact in the user's default container.
+    """Create a new contact, optionally in a non-default container.
 
     Pass any subset of the P1 fields. At least one of ``given_name``,
     ``family_name``, or ``organization`` must be non-empty. Labeled-value
@@ -565,6 +613,11 @@ def create_contact(
     ``"home fax"``, ``"iPhone"``), Apple's raw token
     (``"_$!<Mobile>!$_"``), or any custom string (``"Spotify"``).
     See ``docs/research/label-translation-decision.md``.
+
+    Without ``container_identifier``, the new contact lands in the user's
+    default container (typically iCloud). Pass a specific container UUID
+    from ``list_containers`` to write to a non-default account (e.g.,
+    Gmail/CardDAV). See ``docs/research/multi-container-write-decision.md``.
 
     In test mode (``CONTACTS_TEST_MODE=true``), ``group_identifier`` must
     be provided and must match ``CONTACTS_TEST_GROUP``. The new contact
@@ -583,11 +636,15 @@ def create_contact(
         birthday: ``{year?, month?, day?}`` (any subset).
         group_identifier: If set, the new contact is added to this group
             in the same CNSaveRequest. Required in test mode.
+        container_identifier: If set, target this container instead of
+            the default. Use ``list_containers`` to discover UUIDs. CN
+            validates existence at save time; an unknown identifier
+            surfaces as ``unknown``.
 
     Returns:
         On success: ``{"success": True, "identifier": "...",
-        "group_id": ...}``. ``group_id`` is ``null`` when
-        ``group_identifier`` was None.
+        "group_id": ..., "container_id": ...}``. Both id-echo keys are
+        ``null`` when the corresponding input was not supplied.
         On bad input: ``{"success": False, "error_type":
         "validation_error", "error": ...}``.
         On TCC denial: same shape as ``list_contacts``.
@@ -631,7 +688,9 @@ def create_contact(
 
     try:
         identifier = connector._run_cn_create_contact(
-            fields=fields, group_identifier=group_identifier
+            fields=fields,
+            group_identifier=group_identifier,
+            container_identifier=container_identifier,
         )
     except ContactsNotFoundError as exc:
         return {
@@ -651,6 +710,7 @@ def create_contact(
         "success": True,
         "identifier": identifier,
         "group_id": group_identifier,
+        "container_id": container_identifier,
     }
 
 

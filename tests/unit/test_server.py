@@ -23,6 +23,7 @@ from apple_contacts_mcp.server import (
     get_contacts_in_group,
     import_vcard,
     list_contacts,
+    list_containers,
     list_groups,
     read_note,
     remove_contact_from_group,
@@ -667,7 +668,7 @@ class TestCreateContactTestModeSafety:
 
 
 class TestCreateContactHappyPath:
-    def test_minimal_returns_identifier_with_null_group_id(self) -> None:
+    def test_minimal_returns_identifier_with_null_group_and_container(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
             mock_connector._run_cn_authorization_status.return_value = "authorized"
             mock_connector._run_cn_create_contact.return_value = "NEW-ID-1"
@@ -676,10 +677,12 @@ class TestCreateContactHappyPath:
             "success": True,
             "identifier": "NEW-ID-1",
             "group_id": None,
+            "container_id": None,
         }
         mock_connector._run_cn_create_contact.assert_called_once()
         kwargs = mock_connector._run_cn_create_contact.call_args.kwargs
         assert kwargs["group_identifier"] is None
+        assert kwargs["container_identifier"] is None
         assert kwargs["fields"]["given_name"] == "Alice"
 
     def test_with_group_includes_group_id_in_response(self) -> None:
@@ -693,6 +696,40 @@ class TestCreateContactHappyPath:
             "success": True,
             "identifier": "NEW-ID-2",
             "group_id": "GROUP-XYZ",
+            "container_id": None,
+        }
+
+    def test_with_container_includes_container_id_in_response(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_contact.return_value = "NEW-ID-3"
+            result = create_contact(
+                given_name="Alice",
+                container_identifier="CONTAINER-ABC:ABAccount",
+            )
+        assert result == {
+            "success": True,
+            "identifier": "NEW-ID-3",
+            "group_id": None,
+            "container_id": "CONTAINER-ABC:ABAccount",
+        }
+        kwargs = mock_connector._run_cn_create_contact.call_args.kwargs
+        assert kwargs["container_identifier"] == "CONTAINER-ABC:ABAccount"
+
+    def test_with_group_and_container_echoes_both(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_contact.return_value = "NEW-ID-4"
+            result = create_contact(
+                given_name="Alice",
+                group_identifier="GROUP-XYZ",
+                container_identifier="CONTAINER-ABC:ABAccount",
+            )
+        assert result == {
+            "success": True,
+            "identifier": "NEW-ID-4",
+            "group_id": "GROUP-XYZ",
+            "container_id": "CONTAINER-ABC:ABAccount",
         }
 
     def test_response_keys_are_minimal(self) -> None:
@@ -700,7 +737,12 @@ class TestCreateContactHappyPath:
             mock_connector._run_cn_authorization_status.return_value = "authorized"
             mock_connector._run_cn_create_contact.return_value = "NEW"
             result = create_contact(given_name="Alice")
-        assert set(result.keys()) == {"success", "identifier", "group_id"}
+        assert set(result.keys()) == {
+            "success",
+            "identifier",
+            "group_id",
+            "container_id",
+        }
 
     def test_full_field_set_passes_through_to_connector(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
@@ -1278,6 +1320,109 @@ class TestListGroupsErrors:
                 "boom"
             )
             result = list_groups()
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# list_containers
+# ---------------------------------------------------------------------------
+
+
+_FAKE_CONTAINERS = [
+    {
+        "id": "C-ICLOUD:ABAccount",
+        "name": "iCloud",
+        "type": "cardDAV",
+        "is_default": True,
+    },
+    {
+        "id": "C-GMAIL:ABAccount",
+        "name": "Gmail",
+        "type": "cardDAV",
+        "is_default": False,
+    },
+]
+
+
+class TestListContainersAuthFlow:
+    def test_auth_denied_passthrough_skips_list(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = list_containers()
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_cn_list_containers.assert_not_called()
+
+
+class TestListContainersHappyPath:
+    def test_returns_containers_with_count_and_limit(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_list_containers.return_value = _FAKE_CONTAINERS
+            result = list_containers()
+        assert result == {
+            "success": True,
+            "containers": _FAKE_CONTAINERS,
+            "count": 2,
+            "limit": 10,
+        }
+
+    def test_default_flag_surfaces_per_container(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_list_containers.return_value = _FAKE_CONTAINERS
+            result = list_containers()
+        defaults = [c for c in result["containers"] if c["is_default"]]
+        assert len(defaults) == 1
+        assert defaults[0]["name"] == "iCloud"
+
+    def test_empty_store_returns_empty_list(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_list_containers.return_value = []
+            result = list_containers()
+        assert result["success"] is True
+        assert result["containers"] == []
+        assert result["count"] == 0
+
+    def test_response_keys_are_minimal(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_list_containers.return_value = _FAKE_CONTAINERS
+            result = list_containers()
+        assert set(result.keys()) == {"success", "containers", "count", "limit"}
+
+
+class TestListContainersCapDetection:
+    def test_count_equals_limit_when_cap_hit(self) -> None:
+        cap_hit = [
+            {
+                "id": f"C{i}:ABAccount",
+                "name": f"Container {i}",
+                "type": "cardDAV",
+                "is_default": i == 0,
+            }
+            for i in range(15)
+        ]
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_list_containers.return_value = cap_hit
+            result = list_containers()
+        assert result["count"] == 10
+        assert result["limit"] == 10
+        assert len(result["containers"]) == 10
+
+
+class TestListContainersErrors:
+    def test_unexpected_exception_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_list_containers.side_effect = ContactsError(
+                "boom"
+            )
+            result = list_containers()
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "boom" in result["error"]
