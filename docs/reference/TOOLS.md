@@ -3,7 +3,7 @@
 Reference for every MCP tool the apple-contacts-mcp server exposes.
 
 **Version:** v0.2.1 (tracks the package version)
-**Tools:** 15
+**Tools:** 16
 
 The source-of-truth for tool behavior is the docstrings in
 [src/apple_contacts_mcp/server.py](../../src/apple_contacts_mcp/server.py)
@@ -294,22 +294,30 @@ def create_contact(
 | `postal_addresses` | list[dict] \| None | None | List of dicts with `label` + 8 postal sub-fields (`street`, `sub_locality`, `city`, `sub_administrative_area`, `state`, `postal_code`, `country`, `iso_country_code`). At least one geographic field must be non-empty. |
 | `birthday` | dict \| None | None | `{"year": int, "month": int, "day": int}` (any subset). Month 1-12, day 1-31. |
 | `group_identifier` | str \| None | None | If set, adds the new contact to this group atomically. **Required when `CONTACTS_TEST_MODE=true`** (must equal `CONTACTS_TEST_GROUP`). |
+| `container_identifier` | str \| None | None | If set, writes to this container instead of the user's default (typically iCloud). Use `list_containers` to find UUIDs. CN raises if the identifier is unknown — surfaces as `unknown`. |
 
 At least one of `given_name`, `family_name`, or `organization` must be non-empty (after `.strip()`).
 
 **Returns:**
 
 ```jsonc
-// Without group
-{"success": true, "identifier": "ABCD-…", "group_id": null}
+// Without group, default container
+{"success": true, "identifier": "ABCD-…", "group_id": null, "container_id": null}
 
-// With group
-{"success": true, "identifier": "ABCD-…", "group_id": "GROUP-XYZ"}
+// With group + non-default container
+{
+  "success": true,
+  "identifier": "ABCD-…",
+  "group_id": "GROUP-XYZ",
+  "container_id": "WXYZ-…:ABAccount"
+}
 ```
+
+Both id-echo keys follow the [response-shape convention](#format) — always present, `null` when input was absent.
 
 **Error types:** `validation_error`, `authorization_denied`, `safety_violation`, `not_found`, `unknown`.
 
-`not_found` here means `group_identifier` was supplied but didn't match any group.
+`not_found` here means `group_identifier` was supplied but didn't match any group. Unknown `container_identifier` surfaces as `unknown` (CN's save error propagates).
 
 **Notes:**
 - New contact lands in the `defaultContainerIdentifier` (typically iCloud).
@@ -709,6 +717,50 @@ def import_vcard(
 - **Atomic.** Parse failure, empty input, group-not-found, or save failure aborts the whole call. A multi-contact vCard is committed as one unit.
 - **Malformed input dispatches `validation_error`** (not `unknown`) — Apple's parser is the authority on validity, but the caller is responsible for handing us well-formed text. The `error` string preserves Apple's parser message for debuggability.
 - vCard 4.0 input is accepted (Apple parses both); after import, our internal representation is the unified Apple model regardless of input version.
+
+---
+
+## Phase 3 Tools (v0.3.0)
+
+### list_containers
+
+List all contact containers (accounts).
+
+```python
+def list_containers() -> dict[str, Any]
+```
+
+**Parameters:** none.
+
+**Returns:**
+
+```jsonc
+{
+  "success": true,
+  "containers": [
+    {"id": "F7F61738-…:ABAccount", "name": "iCloud",
+     "type": "cardDAV", "is_default": true},
+    {"id": "797C8A05-…:ABAccount", "name": "Gmail",
+     "type": "cardDAV", "is_default": false}
+  ],
+  "count": 2,
+  "limit": 10
+}
+```
+
+| Field | Description |
+|---|---|
+| `id` | CN identifier (`<UUID>:ABAccount`). Pass to `create_contact(..., container_identifier=...)`. |
+| `name` | User-visible account name. |
+| `type` | One of `"local"` / `"exchange"` / `"cardDAV"`. Even iCloud reports as `cardDAV` (the sync protocol). `"local"` is the legacy "On My Mac" account. |
+| `is_default` | `true` for the container new contacts go into when `container_identifier` is not specified. Exactly one container has this flag. |
+
+**Error types:** `authorization_denied`, `unknown`.
+
+**Notes:**
+- Hard cap at 10 (containers per user are typically <5). `count == limit` indicates the cap was hit.
+- Read-only; no test-mode gating.
+- Empirical basis for the multi-container write path: [`docs/research/multi-container-write-decision.md`](../research/multi-container-write-decision.md).
 
 ---
 

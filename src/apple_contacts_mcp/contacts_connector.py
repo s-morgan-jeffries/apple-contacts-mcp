@@ -56,6 +56,15 @@ _CN_AUTHORIZATION_STATUS: dict[int, str] = {
     4: "limited",  # macOS 14+
 }
 
+# CNContainerType raw values (per the Apple SDK). Verified empirically against
+# macOS 26.3.1: even iCloud comes back as cardDAV (3), since iCloud's contact
+# sync is CardDAV under the hood. Local (1) is the legacy "On My Mac" account.
+_CN_CONTAINER_TYPE: dict[int, str] = {
+    1: "local",
+    2: "exchange",
+    3: "cardDAV",
+}
+
 
 class ContactsConnector:
     """Backend connector for Apple Contacts operations."""
@@ -286,6 +295,40 @@ class ContactsConnector:
             return None
         return results[0]
 
+    def _run_cn_list_containers(self) -> list[dict[str, Any]]:
+        """Enumerate all CN containers (multi-account: iCloud, Gmail, etc.).
+
+        Returns ``[{"id": str, "name": str, "type": str, "is_default":
+        bool}, ...]``. ``type`` is one of ``"local"`` / ``"exchange"`` /
+        ``"cardDAV"`` (mapped from the CN integer enum). ``is_default``
+        flags the container that ``defaultContainerIdentifier`` points
+        at — typically iCloud on macOS.
+
+        Container enumeration is a single CN call (no N+1 like
+        ``_run_cn_list_groups``). Empty store → empty list.
+        """
+        store = self._get_store()
+        containers, err = store.containersMatchingPredicate_error_(None, None)
+        if containers is None:
+            raise ContactsError(f"CN containers fetch failed: {err}")
+
+        default_id = str(store.defaultContainerIdentifier())
+        out: list[dict[str, Any]] = []
+        for c in containers:
+            cid = str(c.identifier())
+            raw_type = int(c.type())
+            out.append(
+                {
+                    "id": cid,
+                    "name": str(c.name()),
+                    "type": _CN_CONTAINER_TYPE.get(
+                        raw_type, f"unknown({raw_type})"
+                    ),
+                    "is_default": cid == default_id,
+                }
+            )
+        return out
+
     def _run_cn_list_groups(self) -> list[dict[str, str]]:
         """Enumerate all groups across all containers.
 
@@ -379,10 +422,22 @@ class ContactsConnector:
         return out
 
     def _run_cn_create_contact(
-        self, fields: dict[str, Any], group_identifier: str | None
+        self,
+        fields: dict[str, Any],
+        group_identifier: str | None,
+        container_identifier: str | None = None,
     ) -> str:
-        """Create a contact in the default container, optionally also
+        """Create a contact in the specified container, optionally also
         adding it to a group, in a single atomic CNSaveRequest.
+
+        ``container_identifier=None`` writes to the default container
+        (typically iCloud); pass an explicit container UUID to target a
+        specific account. No pre-flight existence check — if the
+        identifier doesn't match any container, CN's
+        ``executeSaveRequest:error:`` raises and we surface it as
+        ``ContactsError`` (the server layer dispatches ``unknown``).
+        Behavior verified empirically; see
+        ``docs/research/multi-container-write-decision.md``.
 
         Returns the new contact's CN identifier (CN populates the
         CNMutableContact's identifier in-place after save).
@@ -400,7 +455,9 @@ class ContactsConnector:
                 )
 
         save_req = CNSaveRequest.alloc().init()
-        save_req.addContact_toContainerWithIdentifier_(mutable, None)
+        save_req.addContact_toContainerWithIdentifier_(
+            mutable, container_identifier
+        )
         if group is not None:
             save_req.addMember_toGroup_(mutable, group)
 

@@ -1311,6 +1311,21 @@ def test_create_contact_minimal_returns_new_identifier(
     store.executeSaveRequest_error_.assert_called_once()
 
 
+def test_create_contact_with_explicit_container_passes_uuid_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, _, save_req = _install_fake_contacts_for_create(monkeypatch)
+    connector = ContactsConnector()
+    connector._run_cn_create_contact(
+        fields={"given_name": "Alice"},
+        group_identifier=None,
+        container_identifier="GMAIL-UUID:ABAccount",
+    )
+    save_req.addContact_toContainerWithIdentifier_.assert_called_once()
+    args, _ = save_req.addContact_toContainerWithIdentifier_.call_args
+    assert args[1] == "GMAIL-UUID:ABAccount"
+
+
 def test_create_contact_sets_all_simple_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1733,6 +1748,120 @@ def test_delete_contact_save_failure_raises(
     with pytest.raises(ContactsError) as exc_info:
         connector._run_cn_delete_contact("ABCD")
     assert "delete boom" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# _run_cn_list_containers
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_cn_container(
+    container_id: str, name: str, type_int: int
+) -> MagicMock:
+    c = MagicMock(name=f"CNContainer({container_id})")
+    c.identifier.return_value = container_id
+    c.name.return_value = name
+    c.type.return_value = type_int
+    return c
+
+
+def _install_fake_contacts_for_containers(
+    monkeypatch: pytest.MonkeyPatch,
+    containers: list[MagicMock] | None,
+    default_id: str = "DEFAULT-UUID:ABAccount",
+    containers_err: object | None = None,
+) -> MagicMock:
+    """Install a fake `Contacts` module whose store returns the given
+    container list from ``containersMatchingPredicate_error_`` and the
+    given ``defaultContainerIdentifier``."""
+    store_instance = MagicMock(name="store_instance")
+    store_instance.containersMatchingPredicate_error_.return_value = (
+        containers,
+        containers_err,
+    )
+    store_instance.defaultContainerIdentifier.return_value = default_id
+    _install_fake_contacts_module(monkeypatch, store_factory=store_instance)
+    return store_instance
+
+
+def test_list_containers_empty_store_returns_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_contacts_for_containers(monkeypatch, containers=[])
+    connector = ContactsConnector()
+    assert connector._run_cn_list_containers() == []
+
+
+def test_list_containers_serializes_id_name_type_and_default_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    icloud = _make_fake_cn_container("ICLOUD-UUID:ABAccount", "iCloud", 3)
+    gmail = _make_fake_cn_container("GMAIL-UUID:ABAccount", "Gmail", 3)
+    _install_fake_contacts_for_containers(
+        monkeypatch,
+        containers=[icloud, gmail],
+        default_id="ICLOUD-UUID:ABAccount",
+    )
+    connector = ContactsConnector()
+    result = connector._run_cn_list_containers()
+    assert result == [
+        {
+            "id": "ICLOUD-UUID:ABAccount",
+            "name": "iCloud",
+            "type": "cardDAV",
+            "is_default": True,
+        },
+        {
+            "id": "GMAIL-UUID:ABAccount",
+            "name": "Gmail",
+            "type": "cardDAV",
+            "is_default": False,
+        },
+    ]
+
+
+def test_list_containers_maps_each_known_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local = _make_fake_cn_container("L:ABAccount", "On My Mac", 1)
+    exchange = _make_fake_cn_container("E:ABAccount", "Work", 2)
+    carddav = _make_fake_cn_container("C:ABAccount", "iCloud", 3)
+    _install_fake_contacts_for_containers(
+        monkeypatch,
+        containers=[local, exchange, carddav],
+        default_id="C:ABAccount",
+    )
+    connector = ContactsConnector()
+    result = connector._run_cn_list_containers()
+    types = {r["name"]: r["type"] for r in result}
+    assert types == {
+        "On My Mac": "local",
+        "Work": "exchange",
+        "iCloud": "cardDAV",
+    }
+
+
+def test_list_containers_marks_unknown_type_explicitly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    weird = _make_fake_cn_container("X:ABAccount", "Future", 99)
+    _install_fake_contacts_for_containers(monkeypatch, containers=[weird])
+    connector = ContactsConnector()
+    result = connector._run_cn_list_containers()
+    assert result[0]["type"] == "unknown(99)"
+
+
+def test_list_containers_raises_when_predicate_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_contacts_for_containers(
+        monkeypatch, containers=None, containers_err="cn boom"
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_list_containers()
+    assert "CN containers fetch failed" in str(exc_info.value)
+    assert "cn boom" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ A Model Context Protocol server for Apple Contacts on macOS.
 - `list_groups` / `get_contacts_in_group` — group read.
 - `add_contact_to_group` / `remove_contact_from_group` — group membership.
 - `export_vcard` / `import_vcard` — vCard 3.0 serialization round-trip.
+- `list_containers` — list accounts (iCloud, Gmail, Exchange, On-My-Mac). Pair with `create_contact(..., container_identifier=...)` to write to a non-default container.
 
 ## Install
 
