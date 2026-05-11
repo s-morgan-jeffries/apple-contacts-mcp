@@ -39,6 +39,9 @@ DESTRUCTIVE_OPERATIONS: frozenset[str] = frozenset(
         "add_contact_to_group",
         "remove_contact_from_group",
         "import_vcard",
+        "create_group",
+        "rename_group",
+        "delete_group",
     }
 )
 """Operations gated by `check_test_mode_safety`.
@@ -169,7 +172,7 @@ def require_test_mode_for(operation: str) -> dict[str, Any] | None:
             operation,
             f"{operation} is only available with CONTACTS_TEST_MODE=true. "
             f"The full destructive UX (with confirmation prompts) ships "
-            f"in v0.4.0 (#24).",
+            f"in v0.4.0 (#36).",
         )
     return None
 

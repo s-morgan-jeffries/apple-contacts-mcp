@@ -3,7 +3,7 @@
 Reference for every MCP tool the apple-contacts-mcp server exposes.
 
 **Version:** v0.2.1 (tracks the package version)
-**Tools:** 16
+**Tools:** 19
 
 The source-of-truth for tool behavior is the docstrings in
 [src/apple_contacts_mcp/server.py](../../src/apple_contacts_mcp/server.py)
@@ -761,6 +761,116 @@ def list_containers() -> dict[str, Any]
 - Hard cap at 10 (containers per user are typically <5). `count == limit` indicates the cap was hit.
 - Read-only; no test-mode gating.
 - Empirical basis for the multi-container write path: [`docs/research/multi-container-write-decision.md`](../research/multi-container-write-decision.md).
+
+### create_group
+
+Create a new contact group.
+
+```python
+def create_group(
+    name: str,
+    container_identifier: str | None = None,
+    group_identifier: str | None = None,
+) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `name` | str | — | The new group's name. Non-empty after stripping. |
+| `container_identifier` | str \| None | None | If set, target this container instead of the default. Use `list_containers` to discover UUIDs. CN raises on unknown identifiers; surfaces as `unknown`. |
+| `group_identifier` | str \| None | None | Test-mode safety assertion. Required in test mode (must match `CONTACTS_TEST_GROUP`); ignored otherwise. |
+
+**Returns:**
+
+```jsonc
+{
+  "success": true,
+  "group": {
+    "id": "NEW-…:ABGroup",
+    "name": "MyGroup",
+    "container_id": "F7F61738-…:ABAccount"
+  }
+}
+```
+
+**Error types:** `validation_error`, `authorization_denied`, `safety_violation`, `unknown`.
+
+**Notes:**
+- **Destructive (test-mode gated).** In test mode, `group_identifier` must equal `CONTACTS_TEST_GROUP`. The assertion is "I'm operating within the test-group scope" — same posture as `create_contact`.
+- New group lands in the default container (typically iCloud) unless `container_identifier` is supplied.
+
+### rename_group
+
+Rename an existing contact group.
+
+```python
+def rename_group(
+    identifier: str,
+    new_name: str,
+    group_identifier: str | None = None,
+) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `identifier` | str | — | The CN identifier of the group to rename. |
+| `new_name` | str | — | The new name. Non-empty after stripping. |
+| `group_identifier` | str \| None | None | Test-mode safety assertion. Required in test mode. |
+
+**Returns:**
+
+```jsonc
+{
+  "success": true,
+  "group": {
+    "id": "GRP-…:ABGroup",
+    "name": "Updated Name",
+    "container_id": "F7F61738-…:ABAccount"
+  }
+}
+```
+
+`id` echoes the input.
+
+**Error types:** `validation_error`, `authorization_denied`, `safety_violation`, `not_found`, `unknown`.
+
+**Notes:**
+- **Destructive (test-mode gated).** Same posture as `update_contact`.
+- The asserted scope (`group_identifier`) is independent of the target (`identifier`) — a test harness may rename any group as long as it operates within test-mode scope.
+
+### delete_group
+
+Delete an existing contact group.
+
+```python
+def delete_group(
+    identifier: str,
+    group_identifier: str | None = None,
+) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `identifier` | str | — | The CN identifier of the group to delete. |
+| `group_identifier` | str \| None | None | Test-mode safety assertion. Required in test mode (no other use). |
+
+**Returns:**
+
+```jsonc
+{"success": true, "identifier": "GRP-…:ABGroup"}
+```
+
+**Error types:** `validation_error`, `authorization_denied`, `safety_violation`, `not_found`, `unknown`.
+
+**Notes:**
+- **v0.3.0 only allows delete in test mode** — the full destructive UX (with confirmation prompts) ships in v0.4.0 (#36). Outside test mode this returns a `safety_violation`. Same posture as `delete_contact`.
+- **Member contacts are NOT deleted** — they remain in the address book; they just lose membership in the now-removed group.
 
 ---
 

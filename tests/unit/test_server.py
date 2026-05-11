@@ -17,7 +17,9 @@ from apple_contacts_mcp.server import (
     add_contact_to_group,
     check_authorization,
     create_contact,
+    create_group,
     delete_contact,
+    delete_group,
     export_vcard,
     get_contact,
     get_contacts_in_group,
@@ -27,6 +29,7 @@ from apple_contacts_mcp.server import (
     list_groups,
     read_note,
     remove_contact_from_group,
+    rename_group,
     search_contacts,
     update_contact,
     write_note,
@@ -2003,3 +2006,291 @@ class TestImportVcardErrors:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "save failed" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# create_group
+# ---------------------------------------------------------------------------
+
+
+_NEW_GROUP_DICT = {
+    "id": "NEW-GRP:ABGroup",
+    "name": "MyGroup",
+    "container_id": "ICLOUD:ABAccount",
+}
+
+
+class TestCreateGroupValidation:
+    @pytest.mark.parametrize("name", ["", "   ", "\t"])
+    def test_blank_name_returns_validation_error(self, name: str) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = create_group(name=name)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_authorization_status.assert_not_called()
+
+
+class TestCreateGroupAuthFlow:
+    def test_auth_denied_passthrough_skips_create(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = create_group(name="X")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_cn_create_group.assert_not_called()
+
+
+class TestCreateGroupTestModeSafety:
+    def test_test_mode_without_group_arg_blocked(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = create_group(name="X")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_connector._run_cn_create_group.assert_not_called()
+
+    def test_test_mode_with_matching_group_proceeds(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_group.return_value = _NEW_GROUP_DICT
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = create_group(
+                    name="X", group_identifier="MCP-Test"
+                )
+        assert result == {"success": True, "group": _NEW_GROUP_DICT}
+
+
+class TestCreateGroupHappyPath:
+    def test_returns_group_dict_from_connector(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_group.return_value = _NEW_GROUP_DICT
+            result = create_group(name="MyGroup")
+        assert result == {"success": True, "group": _NEW_GROUP_DICT}
+        kwargs = mock_connector._run_cn_create_group.call_args.kwargs
+        assert kwargs["name"] == "MyGroup"
+        assert kwargs["container_identifier"] is None
+
+    def test_passes_container_identifier_through(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_group.return_value = _NEW_GROUP_DICT
+            create_group(
+                name="MyGroup",
+                container_identifier="GMAIL:ABAccount",
+            )
+        kwargs = mock_connector._run_cn_create_group.call_args.kwargs
+        assert kwargs["container_identifier"] == "GMAIL:ABAccount"
+
+
+class TestCreateGroupErrors:
+    def test_save_failure_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_group.side_effect = ContactsError(
+                "save boom"
+            )
+            result = create_group(name="X")
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "save boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# rename_group
+# ---------------------------------------------------------------------------
+
+
+_RENAMED_GROUP_DICT = {
+    "id": "GRP-1:ABGroup",
+    "name": "Renamed",
+    "container_id": "ICLOUD:ABAccount",
+}
+
+
+class TestRenameGroupValidation:
+    @pytest.mark.parametrize("identifier", ["", "   ", "\t"])
+    def test_blank_identifier_returns_validation_error(
+        self, identifier: str
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = rename_group(identifier=identifier, new_name="X")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_authorization_status.assert_not_called()
+
+    @pytest.mark.parametrize("new_name", ["", "   ", "\t"])
+    def test_blank_new_name_returns_validation_error(
+        self, new_name: str
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = rename_group(identifier="GRP-1", new_name=new_name)
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_authorization_status.assert_not_called()
+
+
+class TestRenameGroupAuthFlow:
+    def test_auth_denied_passthrough_skips_rename(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "denied"
+            result = rename_group(identifier="GRP-1", new_name="X")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        mock_connector._run_cn_rename_group.assert_not_called()
+
+
+class TestRenameGroupTestModeSafety:
+    def test_test_mode_without_group_arg_blocked(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = rename_group(identifier="GRP-1", new_name="X")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_connector._run_cn_rename_group.assert_not_called()
+
+    def test_test_mode_with_matching_group_proceeds(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_rename_group.return_value = _RENAMED_GROUP_DICT
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = rename_group(
+                    identifier="GRP-1",
+                    new_name="Renamed",
+                    group_identifier="MCP-Test",
+                )
+        assert result == {"success": True, "group": _RENAMED_GROUP_DICT}
+
+
+class TestRenameGroupErrors:
+    def test_not_found_from_connector(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_rename_group.side_effect = (
+                ContactsNotFoundError("Group not found: 'BAD'")
+            )
+            result = rename_group(identifier="BAD", new_name="X")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+
+    def test_save_failure_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_rename_group.side_effect = ContactsError(
+                "save boom"
+            )
+            result = rename_group(identifier="GRP-1", new_name="X")
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "save boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# delete_group
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteGroupValidation:
+    def test_empty_identifier_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = delete_group(identifier="")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_authorization_status.assert_not_called()
+
+
+class TestDeleteGroupRequiresTestMode:
+    def test_test_mode_off_returns_safety_violation(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = delete_group(identifier="GRP-1")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        assert "CONTACTS_TEST_MODE" in result["error"]
+        # Auth was NOT triggered (no TCC prompt for an op we refused).
+        mock_connector._run_cn_authorization_status.assert_not_called()
+        mock_connector._run_cn_delete_group.assert_not_called()
+
+
+class TestDeleteGroupTestGroupGate:
+    def test_test_mode_on_no_group_arg_blocked(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = delete_group(identifier="GRP-1")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        mock_connector._run_cn_delete_group.assert_not_called()
+
+    def test_test_mode_on_with_matching_group_proceeds(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_delete_group.return_value = "GRP-1"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = delete_group(
+                    identifier="GRP-1", group_identifier="MCP-Test"
+                )
+        assert result == {"success": True, "identifier": "GRP-1"}
+
+
+class TestDeleteGroupErrors:
+    def test_not_found_from_connector(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_delete_group.side_effect = (
+                ContactsNotFoundError("Group not found: 'BAD'")
+            )
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = delete_group(
+                    identifier="BAD", group_identifier="MCP-Test"
+                )
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+
+    def test_save_failure_returns_unknown(self, monkeypatch: Any) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_delete_group.side_effect = ContactsError(
+                "save boom"
+            )
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = delete_group(
+                    identifier="GRP-1", group_identifier="MCP-Test"
+                )
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "save boom" in result["error"]

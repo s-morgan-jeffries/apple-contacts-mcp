@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `list_containers` — enumerate contact containers (accounts: iCloud, Gmail, Exchange, On-My-Mac). Returns `{id, name, type, is_default}` per entry, capped at 10. `type` is one of `"local"` / `"exchange"` / `"cardDAV"` (even iCloud reports as `cardDAV` — the sync protocol). `is_default` flags the container new contacts go into when `container_identifier` isn't specified (#26).
 - `create_contact` gained an optional `container_identifier` parameter — pass a container UUID from `list_containers` to write to a non-default account; default `None` keeps current iCloud-default behavior. Response now echoes both `group_id` and `container_id` (both `null` when input absent, per the v0.2.1 response-shape convention). Empirical basis: [`docs/research/multi-container-write-decision.md`](docs/research/multi-container-write-decision.md). **Non-breaking** for existing callers (#26).
+- `create_group(name, container_identifier=None)` — create a new contact group via `CNMutableGroup` + `CNSaveRequest.addGroup:toContainerWithIdentifier:`. Lands in the default container unless `container_identifier` is supplied. Returns `{id, name, container_id}`. Test-mode gated like `create_contact` (#24).
+- `rename_group(identifier, new_name)` — rename an existing group via `CNSaveRequest.updateGroup:`. Returns the updated `{id, name, container_id}`. Test-mode gated like `update_contact` (#24).
+- `delete_group(identifier)` — delete a group via `CNSaveRequest.deleteGroup:`. **Test-mode-only in v0.3.x** (same posture as `delete_contact`); confirmation UX ships in v0.4.0 (#36). Member contacts are NOT deleted — they remain in the address book, just lose membership in the now-removed group (#24).
+- `create_group` / `rename_group` / `delete_group` added to `DESTRUCTIVE_OPERATIONS` so the test-mode safety gate covers them.
+
+### Fixed
+
+- Stale `(#24)` reference in `require_test_mode_for`'s error message and `delete_contact`'s docstring — pointed at the Group CRUD issue (this PR) instead of the actual v0.4.0 confirmation-UX issue. Now correctly reads `(#36)` (#24).
 
 ## [0.2.1] - 2026-05-10
 

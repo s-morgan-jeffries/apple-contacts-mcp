@@ -840,8 +840,8 @@ def delete_contact(
 ) -> dict[str, Any]:
     """Delete an existing contact by identifier.
 
-    **v0.1.0 only allows delete in test mode** — the full destructive
-    UX (with confirmation prompts) ships in v0.4.0 (#24). Outside test
+    **v0.1.0+ only allows delete in test mode** — the full destructive
+    UX (with confirmation prompts) ships in v0.4.0 (#36). Outside test
     mode this returns a safety_violation error.
 
     In test mode (``CONTACTS_TEST_MODE=true``), ``group_identifier``
@@ -1308,6 +1308,199 @@ def remove_contact_from_group(
         "contact_identifier": contact_identifier,
         "group_identifier": group_identifier,
     }
+
+
+@mcp.tool()
+def create_group(
+    name: str,
+    container_identifier: str | None = None,
+    group_identifier: str | None = None,
+) -> dict[str, Any]:
+    """Create a new contact group.
+
+    Without ``container_identifier``, the group lands in the user's
+    default container (typically iCloud). Pass a specific container
+    UUID from ``list_containers`` to target a non-default account.
+
+    In test mode (``CONTACTS_TEST_MODE=true``), ``group_identifier``
+    must equal ``CONTACTS_TEST_GROUP`` — the assertion is "I'm
+    operating within the test-group scope," same posture as
+    ``create_contact``.
+
+    Args:
+        name: The new group's name. Must be non-empty after stripping.
+        container_identifier: If set, write to this container instead
+            of the default. CN raises on unknown identifiers; surfaces
+            as ``unknown``.
+        group_identifier: Test-mode safety assertion. Required in test
+            mode; ignored otherwise.
+
+    Returns:
+        On success: ``{"success": True, "group": {"id": ..., "name":
+        ..., "container_id": ...}}``.
+        On bad input: ``validation_error``.
+        On TCC denial: ``authorization_denied``.
+        On test-mode mismatch: ``safety_violation``.
+        On CN save failure (including unknown container): ``unknown``.
+    """
+    if not name or not name.strip():
+        return _validation_error("name must be a non-empty string")
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    safety_err = check_test_mode_safety(
+        "create_group", group=group_identifier
+    )
+    if safety_err is not None:
+        return safety_err
+
+    try:
+        group = connector._run_cn_create_group(
+            name=name, container_identifier=container_identifier
+        )
+    except Exception as exc:
+        logger.error("create_group failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"create_group failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {"success": True, "group": group}
+
+
+@mcp.tool()
+def rename_group(
+    identifier: str,
+    new_name: str,
+    group_identifier: str | None = None,
+) -> dict[str, Any]:
+    """Rename an existing contact group.
+
+    In test mode (``CONTACTS_TEST_MODE=true``), ``group_identifier``
+    must equal ``CONTACTS_TEST_GROUP``. The asserted scope is
+    independent of the target ``identifier``: a test harness may
+    rename any group as long as it's operating within test-mode scope.
+
+    Args:
+        identifier: The CN identifier of the group to rename.
+        new_name: The new name. Must be non-empty after stripping.
+        group_identifier: Test-mode safety assertion. Required in test
+            mode; ignored otherwise.
+
+    Returns:
+        On success: ``{"success": True, "group": {"id": ..., "name":
+        ..., "container_id": ...}}``. ``id`` echoes the input.
+        On bad input: ``validation_error``.
+        On TCC denial: ``authorization_denied``.
+        On test-mode mismatch: ``safety_violation``.
+        On unknown ``identifier``: ``not_found``.
+        On CN save failure: ``unknown``.
+    """
+    if not identifier or not identifier.strip():
+        return _validation_error("identifier must be a non-empty string")
+    if not new_name or not new_name.strip():
+        return _validation_error("new_name must be a non-empty string")
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    safety_err = check_test_mode_safety(
+        "rename_group", group=group_identifier
+    )
+    if safety_err is not None:
+        return safety_err
+
+    try:
+        group = connector._run_cn_rename_group(
+            identifier=identifier, new_name=new_name
+        )
+    except ContactsNotFoundError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": "not_found",
+        }
+    except Exception as exc:
+        logger.error("rename_group failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"rename_group failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {"success": True, "group": group}
+
+
+@mcp.tool()
+def delete_group(
+    identifier: str,
+    group_identifier: str | None = None,
+) -> dict[str, Any]:
+    """Delete an existing contact group.
+
+    **v0.3.0 only allows delete in test mode** — the full destructive
+    UX (with confirmation prompts) ships in v0.4.0 (#36). Outside test
+    mode this returns a safety_violation error.
+
+    In test mode (``CONTACTS_TEST_MODE=true``), ``group_identifier``
+    must equal ``CONTACTS_TEST_GROUP``. Same posture as
+    ``delete_contact``.
+
+    Member contacts are NOT deleted by this operation — they keep
+    existing in the address book; they just lose membership in the
+    now-removed group.
+
+    Args:
+        identifier: The CN identifier of the group to delete.
+        group_identifier: Test-mode safety assertion. Required in test
+            mode (no other use).
+
+    Returns:
+        On success: ``{"success": True, "identifier": identifier}``.
+        On bad input: ``validation_error``.
+        On test mode off: ``safety_violation``.
+        On TCC denial: ``authorization_denied``.
+        On unknown ``identifier``: ``not_found``.
+        On CN save failure: ``unknown``.
+    """
+    if not identifier or not identifier.strip():
+        return _validation_error("identifier must be a non-empty string")
+
+    require_err = require_test_mode_for("delete_group")
+    if require_err is not None:
+        return require_err
+
+    auth_err = _require_contacts_authorization()
+    if auth_err is not None:
+        return auth_err
+
+    safety_err = check_test_mode_safety(
+        "delete_group", group=group_identifier
+    )
+    if safety_err is not None:
+        return safety_err
+
+    try:
+        connector._run_cn_delete_group(identifier=identifier)
+    except ContactsNotFoundError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "error_type": "not_found",
+        }
+    except Exception as exc:
+        logger.error("delete_group failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"delete_group failed: {exc}",
+            "error_type": "unknown",
+        }
+
+    return {"success": True, "identifier": identifier}
 
 
 def main() -> None:
