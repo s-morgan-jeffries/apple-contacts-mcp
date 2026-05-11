@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from apple_contacts_mcp.utils import (
+    detect_image_format,
     escape_applescript_string,
     label_to_apple_token,
 )
@@ -134,3 +135,60 @@ def test_label_empty_string_passes_through() -> None:
 def test_label_whitespace_only_passes_through() -> None:
     """Whitespace-only is not a valid human form; treat as custom (don't crash)."""
     assert label_to_apple_token("   ") == "   "
+
+
+# ---------------------------------------------------------------------------
+# detect_image_format
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("magic", "expected"),
+    [
+        # JPEG: FF D8 FF followed by anything (JFIF, EXIF, etc. all share the prefix)
+        (b"\xff\xd8\xff\xe0\x00\x10JFIF\x00", "jpeg"),
+        (b"\xff\xd8\xff\xe1\x00\x10Exif\x00", "jpeg"),
+        # PNG: full 8-byte signature
+        (b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "png"),
+        # GIF: 87a or 89a variants both start "GIF8"
+        (b"GIF87a" + b"\x00" * 10, "gif"),
+        (b"GIF89a" + b"\x00" * 10, "gif"),
+    ],
+)
+def test_detect_image_format_known_formats(magic: bytes, expected: str) -> None:
+    assert detect_image_format(magic) == expected
+
+
+@pytest.mark.parametrize(
+    "brand", [b"heic", b"heix", b"heif", b"hevc", b"hevx", b"mif1", b"msf1"]
+)
+def test_detect_image_format_heic_brands(brand: bytes) -> None:
+    """Apple emits several HEIF-family ftyp brands; all should detect as 'heic'."""
+    # 4-byte size prefix + 'ftyp' + brand + rest
+    data = b"\x00\x00\x00\x18ftyp" + brand + b"\x00" * 32
+    assert detect_image_format(data) == "heic"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"",
+        b"\x00",
+        b"\x00\x00",
+        b"hello world",
+        b"\xff\xd8",  # truncated JPEG header (1 byte short)
+        b"\x89PN",  # truncated PNG header
+        b"\x00\x00\x00\x18ftypwhat" + b"\x00" * 16,  # ftyp with unknown brand
+        b"randombytesthatlooklikenothing",
+    ],
+)
+def test_detect_image_format_unknown_or_short_input(data: bytes) -> None:
+    assert detect_image_format(data) == "unknown"
+
+
+def test_detect_image_format_does_not_raise_on_short_input() -> None:
+    """The detector must be robust against any-length input.
+    Every byte length from 0..12 should return 'unknown' without raising."""
+    for n in range(13):
+        # Use bytes that don't match any magic
+        assert detect_image_format(b"\x01" * n) == "unknown"

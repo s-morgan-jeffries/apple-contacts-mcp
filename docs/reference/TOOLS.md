@@ -3,7 +3,7 @@
 Reference for every MCP tool the apple-contacts-mcp server exposes.
 
 **Version:** v0.2.1 (tracks the package version)
-**Tools:** 19
+**Tools:** 21
 
 The source-of-truth for tool behavior is the docstrings in
 [src/apple_contacts_mcp/server.py](../../src/apple_contacts_mcp/server.py)
@@ -761,6 +761,84 @@ def list_containers() -> dict[str, Any]
 - Hard cap at 10 (containers per user are typically <5). `count == limit` indicates the cap was hit.
 - Read-only; no test-mode gating.
 - Empirical basis for the multi-container write path: [`docs/research/multi-container-write-decision.md`](../research/multi-container-write-decision.md).
+
+### read_photo
+
+Read a contact's photo. Returns base64-encoded bytes plus the detected image format.
+
+```python
+def read_photo(identifier: str) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `identifier` | str | — | The contact's CN identifier. |
+
+**Returns:**
+
+```jsonc
+// Contact exists, photo set
+{
+  "success": true,
+  "identifier": "ABCD-…",
+  "image_data": "<base64-encoded bytes>",
+  "format": "jpeg",
+  "size_bytes": 12345
+}
+
+// Contact exists, no photo set — distinct from not_found
+{
+  "success": true,
+  "identifier": "ABCD-…",
+  "image_data": null,
+  "format": null,
+  "size_bytes": 0
+}
+```
+
+**Error types:** `validation_error`, `authorization_denied`, `not_found`, `unknown`.
+
+**Notes:**
+- **Binary transport:** `image_data` is base64-encoded (`base64.b64encode(bytes).decode("ascii")`). Callers decode via `base64.b64decode(image_data)` to recover the raw bytes.
+- **Format detection** runs magic-byte detection on the raw bytes; the result is one of `"jpeg"`, `"png"`, `"gif"`, `"heic"`, or `"unknown"`. The HEIC bucket covers the HEIF-family ISOBMFF brands Apple emits (heic, heix, heif, hevc, hevx, mif1, msf1).
+- **The no-photo case is a SUCCESS**, not `not_found`. Callers must check `image_data is not None` to detect "has photo," not key presence.
+- Per the gap analysis gotcha, the connector always checks `imageDataAvailable()` before calling `imageData()` — directly reading on a photo-less contact misbehaves empirically.
+
+### write_photo
+
+Set or clear a contact's photo.
+
+```python
+def write_photo(
+    identifier: str,
+    image_data: str | None,
+    group_identifier: str | None = None,
+) -> dict[str, Any]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `identifier` | str | — | The contact's CN identifier. |
+| `image_data` | str \| None | — | Base64-encoded image bytes (JPEG/PNG/HEIC supported by Apple). `null` clears the existing photo. |
+| `group_identifier` | str \| None | None | Test-mode safety assertion. Required in test mode (must match `CONTACTS_TEST_GROUP`); ignored otherwise. |
+
+**Returns:**
+
+```jsonc
+{"success": true, "identifier": "ABCD-…"}
+```
+
+**Error types:** `validation_error`, `authorization_denied`, `safety_violation`, `not_found`, `unknown`.
+
+**Notes:**
+- **Destructive (test-mode gated).** Same posture as `update_contact`.
+- **Binary transport:** caller supplies base64-encoded text via `base64.b64encode(bytes).decode("ascii")`. The tool decodes via `base64.b64decode(..., validate=True)` and surfaces decode errors as `validation_error`.
+- **Permissive on format:** the tool does not pre-validate that the bytes are a recognized image format. Apple is the authority — if it rejects the bytes, `CNSaveRequest` fails and we surface `unknown`.
+- **`image_data=null` clears the photo** — the standard way to remove a contact's existing image. The clear path is atomic just like a write.
 
 ### create_group
 

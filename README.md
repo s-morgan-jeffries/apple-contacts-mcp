@@ -14,6 +14,7 @@ A Model Context Protocol server for Apple Contacts on macOS.
 - `update_contact` — partial-field update.
 - `delete_contact` — test-mode-only in v0.2.x; full destructive UX ships in v0.4.0.
 - `read_note` / `write_note` — note field via AppleScript fallback (entitlement-gated in CN).
+- `read_photo` / `write_photo` — contact photo as base64-encoded bytes; read returns the detected format (JPEG/PNG/HEIC/GIF).
 - `list_groups` / `get_contacts_in_group` — group read.
 - `add_contact_to_group` / `remove_contact_from_group` — group membership.
 - `create_group` / `rename_group` / `delete_group` — group CRUD. `delete_group` is test-mode-only in v0.3.x; full destructive UX with confirmation prompts ships in v0.4.0.

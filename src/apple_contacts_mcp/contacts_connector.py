@@ -943,6 +943,75 @@ class ContactsConnector:
             )
         return out
 
+    def _run_cn_read_photo(
+        self, identifier: str
+    ) -> dict[str, Any] | None:
+        """Read a contact's photo via CN's ``imageData()``.
+
+        Returns ``None`` if no contact matches (mirrors
+        ``_run_cn_unified_contact``'s missing-contact contract).
+        Otherwise returns ``{"available": bool, "image_data": bytes}``.
+        When ``available`` is False, ``image_data`` is ``b""``.
+
+        Always checks ``imageDataAvailable()`` BEFORE calling ``imageData()`` —
+        per the gap analysis, calling ``imageData()`` on a photo-less contact
+        is documented to misbehave.
+        """
+        from Contacts import (
+            CNContactImageDataAvailableKey,
+            CNContactImageDataKey,
+        )
+
+        keys = [CNContactImageDataKey, CNContactImageDataAvailableKey]
+        store = self._get_store()
+        contact, _err = store.unifiedContactWithIdentifier_keysToFetch_error_(
+            identifier, keys, None
+        )
+        if contact is None:
+            return None
+
+        if not bool(contact.imageDataAvailable()):
+            return {"available": False, "image_data": b""}
+
+        raw = contact.imageData()
+        # PyObjC bridges NSData → bytes for slicing/len; force-cast in case.
+        return {"available": True, "image_data": bytes(raw) if raw else b""}
+
+    def _run_cn_write_photo(
+        self, identifier: str, image_data: bytes | None
+    ) -> str:
+        """Set or clear a contact's photo via CN's ``setImageData_``.
+
+        ``image_data=None`` clears the photo. Otherwise pass raw bytes;
+        PyObjC bridges ``bytes`` → ``NSData`` automatically. Apple is
+        the authority on what bytes it accepts — if the bytes are
+        rejected, ``executeSaveRequest:error:`` returns False and we
+        raise ``ContactsError`` (server layer surfaces ``unknown``).
+
+        Returns the identifier (echo).
+        """
+        from Contacts import CNContactImageDataKey, CNSaveRequest
+
+        store = self._get_store()
+        contact, _err = store.unifiedContactWithIdentifier_keysToFetch_error_(
+            identifier, [CNContactImageDataKey], None
+        )
+        if contact is None:
+            raise ContactsNotFoundError(
+                f"Contact not found: {identifier!r}"
+            )
+
+        mutable = contact.mutableCopy()
+        mutable.setImageData_(image_data)
+
+        save_req = CNSaveRequest.alloc().init()
+        save_req.updateContact_(mutable)
+        ok, err = store.executeSaveRequest_error_(save_req, None)
+        if not ok:
+            raise ContactsError(f"CN photo write failed: {err}")
+
+        return identifier
+
     def _run_cn_unified_contact(
         self, identifier: str
     ) -> dict[str, Any] | None:

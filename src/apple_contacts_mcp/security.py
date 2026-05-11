@@ -42,6 +42,7 @@ DESTRUCTIVE_OPERATIONS: frozenset[str] = frozenset(
         "create_group",
         "rename_group",
         "delete_group",
+        "write_photo",
     }
 )
 """Operations gated by `check_test_mode_safety`.

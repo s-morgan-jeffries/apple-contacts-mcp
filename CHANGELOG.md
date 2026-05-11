@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rename_group(identifier, new_name)` — rename an existing group via `CNSaveRequest.updateGroup:`. Returns the updated `{id, name, container_id}`. Test-mode gated like `update_contact` (#24).
 - `delete_group(identifier)` — delete a group via `CNSaveRequest.deleteGroup:`. **Test-mode-only in v0.3.x** (same posture as `delete_contact`); confirmation UX ships in v0.4.0 (#36). Member contacts are NOT deleted — they remain in the address book, just lose membership in the now-removed group (#24).
 - `create_group` / `rename_group` / `delete_group` added to `DESTRUCTIVE_OPERATIONS` so the test-mode safety gate covers them.
+- `read_photo(identifier)` — read a contact's photo. Returns `{image_data: <base64>, format: "jpeg" | "png" | "gif" | "heic" | "unknown", size_bytes: N}` when a photo is set; `{image_data: null, format: null, size_bytes: 0}` when the contact exists but has no photo. The contact-not-found case dispatches `not_found` distinctly. Per the gap analysis gotcha, the connector always checks `imageDataAvailable()` before calling `imageData()` (#25).
+- `write_photo(identifier, image_data, group_identifier=None)` — set or clear a contact's photo via `setImageData_`. `image_data` is base64-encoded; `None` clears. Permissive on format — Apple is the authority on accepted bytes. Test-mode gated like `update_contact` (#25).
+- `detect_image_format(bytes) -> str` helper in `utils.py` — magic-byte detector returning one of `"jpeg"` / `"png"` / `"gif"` / `"heic"` / `"unknown"`. The HEIC bucket covers all HEIF-family ISOBMFF brands Apple emits. Pure function; no PyObjC dependency.
 
 ### Fixed
 
