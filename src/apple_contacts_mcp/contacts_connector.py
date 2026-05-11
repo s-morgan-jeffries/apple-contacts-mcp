@@ -295,6 +295,122 @@ class ContactsConnector:
             return None
         return results[0]
 
+    def _resolve_container_id(self, group_identifier: str) -> str:
+        """Resolve the container id that owns the given group.
+
+        Returns ``""`` defensively if CN returns no containers — Apple
+        shouldn't surface a group without a container, but the API
+        contract doesn't forbid it.
+        """
+        from Contacts import CNContainer
+
+        store = self._get_store()
+        cpred = CNContainer.predicateForContainerOfGroupWithIdentifier_(
+            group_identifier
+        )
+        containers, cerr = store.containersMatchingPredicate_error_(
+            cpred, None
+        )
+        if containers is None:
+            raise ContactsError(f"CN container fetch failed: {cerr}")
+        if len(containers) == 0:
+            return ""
+        return str(containers[0].identifier())
+
+    def _run_cn_create_group(
+        self, name: str, container_identifier: str | None
+    ) -> dict[str, str]:
+        """Create a new group via CNSaveRequest.addGroup:toContainerWithIdentifier:.
+
+        Returns ``{"id": ..., "name": ..., "container_id": ...}`` —
+        same shape as ``_run_cn_list_groups`` entries. Container id is
+        resolved post-save via the same predicate used by list_groups;
+        falls back to ``""`` defensively (parallel to list_groups).
+
+        ``container_identifier=None`` writes to the default container
+        (typically iCloud). An unknown identifier surfaces as
+        ``ContactsError`` from ``executeSaveRequest:error:``.
+        """
+        from Contacts import CNMutableGroup, CNSaveRequest
+
+        mutable = CNMutableGroup.alloc().init()
+        mutable.setName_(name)
+
+        save_req = CNSaveRequest.alloc().init()
+        save_req.addGroup_toContainerWithIdentifier_(
+            mutable, container_identifier
+        )
+
+        store = self._get_store()
+        ok, err = store.executeSaveRequest_error_(save_req, None)
+        if not ok:
+            raise ContactsError(f"CN group create failed: {err}")
+
+        new_id = str(mutable.identifier())
+        return {
+            "id": new_id,
+            "name": str(mutable.name()),
+            "container_id": self._resolve_container_id(new_id),
+        }
+
+    def _run_cn_rename_group(
+        self, identifier: str, new_name: str
+    ) -> dict[str, str]:
+        """Rename an existing group. Returns the same 3-field dict shape
+        as ``_run_cn_create_group``.
+
+        Pre-flights via ``_run_cn_fetch_group`` so missing-group errors
+        surface as ``ContactsNotFoundError`` (the server layer dispatches
+        ``not_found``).
+        """
+        from Contacts import CNSaveRequest
+
+        group = self._run_cn_fetch_group(identifier)
+        if group is None:
+            raise ContactsNotFoundError(f"Group not found: {identifier!r}")
+
+        mutable = group.mutableCopy()
+        mutable.setName_(new_name)
+
+        save_req = CNSaveRequest.alloc().init()
+        save_req.updateGroup_(mutable)
+
+        store = self._get_store()
+        ok, err = store.executeSaveRequest_error_(save_req, None)
+        if not ok:
+            raise ContactsError(f"CN group rename failed: {err}")
+
+        return {
+            "id": identifier,
+            "name": str(mutable.name()),
+            "container_id": self._resolve_container_id(identifier),
+        }
+
+    def _run_cn_delete_group(self, identifier: str) -> str:
+        """Delete a group. Returns the deleted identifier (echo).
+
+        Pre-flights via ``_run_cn_fetch_group``. Member contacts are NOT
+        deleted — they keep existing in the address book; they just lose
+        membership in the now-removed group. (CN's ``deleteGroup_``
+        scope is the group object itself, not its contents.)
+        """
+        from Contacts import CNSaveRequest
+
+        group = self._run_cn_fetch_group(identifier)
+        if group is None:
+            raise ContactsNotFoundError(f"Group not found: {identifier!r}")
+
+        mutable = group.mutableCopy()
+        save_req = CNSaveRequest.alloc().init()
+        save_req.deleteGroup_(mutable)
+
+        store = self._get_store()
+        ok, err = store.executeSaveRequest_error_(save_req, None)
+        if not ok:
+            raise ContactsError(f"CN group delete failed: {err}")
+
+        return identifier
+
     def _run_cn_list_containers(self) -> list[dict[str, Any]]:
         """Enumerate all CN containers (multi-account: iCloud, Gmail, etc.).
 

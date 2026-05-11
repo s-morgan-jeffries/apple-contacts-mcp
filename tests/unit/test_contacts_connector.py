@@ -1751,6 +1751,263 @@ def test_delete_contact_save_failure_raises(
 
 
 # ---------------------------------------------------------------------------
+# _run_cn_create_group / _run_cn_rename_group / _run_cn_delete_group
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_contacts_for_group_crud(
+    monkeypatch: pytest.MonkeyPatch,
+    fetched_group: MagicMock | None = None,
+    new_group_id: str = "NEW-GROUP-ID:ABGroup",
+    new_group_name: str = "Probe Group",
+    container_results: list[MagicMock] | None = None,
+    save_succeeds: bool = True,
+    fake_save_error: Any | None = None,
+) -> tuple[MagicMock, MagicMock, MagicMock]:
+    """Install a fake `Contacts` module for group CRUD tests.
+
+    The store's ``groupsMatchingPredicate_error_`` returns
+    ``([fetched_group], None)`` if ``fetched_group`` is non-None,
+    otherwise ``([], None)`` so ``_run_cn_fetch_group`` returns None.
+
+    ``container_results`` powers the post-save container_id resolution
+    in ``_resolve_container_id``. Defaults to a single fake container
+    with identifier "DEFAULT-CONT:ABAccount".
+
+    Returns (store_instance, save_request_instance, new_mutable_instance).
+    The new_mutable_instance is what CNMutableGroup.alloc().init() returns —
+    callers can inspect ``setName_`` calls on it.
+    """
+    fake_contacts = types.ModuleType("Contacts")
+
+    new_mutable = MagicMock(name="new_mutable_group")
+    new_mutable.identifier.return_value = new_group_id
+    new_mutable.name.return_value = new_group_name
+    cn_mutable_group_class = MagicMock(name="CNMutableGroup")
+    cn_mutable_group_class.alloc.return_value.init.return_value = new_mutable
+    fake_contacts.CNMutableGroup = cn_mutable_group_class  # type: ignore[attr-defined]
+
+    cn_group_class = MagicMock(name="CNGroup")
+    cn_group_class.predicateForGroupsWithIdentifiers_.return_value = "GROUP_PRED"
+    fake_contacts.CNGroup = cn_group_class  # type: ignore[attr-defined]
+
+    cn_container_class = MagicMock(name="CNContainer")
+    cn_container_class.predicateForContainerOfGroupWithIdentifier_.return_value = (
+        "CONTAINER_PRED"
+    )
+    fake_contacts.CNContainer = cn_container_class  # type: ignore[attr-defined]
+
+    save_req = MagicMock(name="save_request")
+    cn_save_request_class = MagicMock(name="CNSaveRequest")
+    cn_save_request_class.alloc.return_value.init.return_value = save_req
+    fake_contacts.CNSaveRequest = cn_save_request_class  # type: ignore[attr-defined]
+
+    store_instance = MagicMock(name="store_instance")
+    if fetched_group is None:
+        store_instance.groupsMatchingPredicate_error_.return_value = (
+            [],
+            None,
+        )
+    else:
+        store_instance.groupsMatchingPredicate_error_.return_value = (
+            [fetched_group],
+            None,
+        )
+    store_instance.executeSaveRequest_error_.return_value = (
+        save_succeeds,
+        fake_save_error,
+    )
+    if container_results is None:
+        default_container = MagicMock(name="default_container")
+        default_container.identifier.return_value = "DEFAULT-CONT:ABAccount"
+        container_results = [default_container]
+    store_instance.containersMatchingPredicate_error_.return_value = (
+        container_results,
+        None,
+    )
+
+    cn_store_class = MagicMock(name="CNContactStore")
+    cn_store_class.alloc.return_value.init.return_value = store_instance
+    fake_contacts.CNContactStore = cn_store_class  # type: ignore[attr-defined]
+    fake_contacts.CNEntityTypeContacts = 0  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "Contacts", fake_contacts)
+    return store_instance, save_req, new_mutable
+
+
+# ----- _run_cn_create_group ---------------------------------------------------
+
+
+def test_create_group_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, save_req, new_mutable = _install_fake_contacts_for_group_crud(
+        monkeypatch,
+        new_group_id="GRP-1:ABGroup",
+        new_group_name="MyGroup",
+    )
+    connector = ContactsConnector()
+    result = connector._run_cn_create_group(
+        name="MyGroup", container_identifier=None
+    )
+    assert result == {
+        "id": "GRP-1:ABGroup",
+        "name": "MyGroup",
+        "container_id": "DEFAULT-CONT:ABAccount",
+    }
+    new_mutable.setName_.assert_called_once_with("MyGroup")
+    save_req.addGroup_toContainerWithIdentifier_.assert_called_once_with(
+        new_mutable, None
+    )
+    store.executeSaveRequest_error_.assert_called_once()
+
+
+def test_create_group_with_explicit_container_passes_uuid_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, save_req, new_mutable = _install_fake_contacts_for_group_crud(monkeypatch)
+    connector = ContactsConnector()
+    connector._run_cn_create_group(
+        name="X", container_identifier="GMAIL-UUID:ABAccount"
+    )
+    args, _ = save_req.addGroup_toContainerWithIdentifier_.call_args
+    assert args[0] is new_mutable
+    assert args[1] == "GMAIL-UUID:ABAccount"
+
+
+def test_create_group_falls_back_to_empty_container_id_when_lookup_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_contacts_for_group_crud(
+        monkeypatch, container_results=[]
+    )
+    connector = ContactsConnector()
+    result = connector._run_cn_create_group(
+        name="MyGroup", container_identifier=None
+    )
+    assert result["container_id"] == ""
+
+
+def test_create_group_save_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    err = MagicMock(name="NSError(save)")
+    err.__str__.return_value = "create boom"
+    _install_fake_contacts_for_group_crud(
+        monkeypatch, save_succeeds=False, fake_save_error=err
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_create_group(name="X", container_identifier=None)
+    assert "CN group create failed" in str(exc_info.value)
+    assert "create boom" in str(exc_info.value)
+
+
+# ----- _run_cn_rename_group ---------------------------------------------------
+
+
+def test_rename_group_raises_not_found_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, save_req, _ = _install_fake_contacts_for_group_crud(
+        monkeypatch, fetched_group=None
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsNotFoundError):
+        connector._run_cn_rename_group("MISSING", "Newname")
+    save_req.updateGroup_.assert_not_called()
+    store.executeSaveRequest_error_.assert_not_called()
+
+
+def test_rename_group_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    existing = MagicMock(name="existing_group")
+    mutable_copy = MagicMock(name="mutable_copy")
+    mutable_copy.name.return_value = "Updated Name"
+    existing.mutableCopy.return_value = mutable_copy
+    store, save_req, _ = _install_fake_contacts_for_group_crud(
+        monkeypatch, fetched_group=existing
+    )
+    connector = ContactsConnector()
+    result = connector._run_cn_rename_group("GRP-1:ABGroup", "Updated Name")
+    assert result == {
+        "id": "GRP-1:ABGroup",
+        "name": "Updated Name",
+        "container_id": "DEFAULT-CONT:ABAccount",
+    }
+    mutable_copy.setName_.assert_called_once_with("Updated Name")
+    save_req.updateGroup_.assert_called_once_with(mutable_copy)
+    store.executeSaveRequest_error_.assert_called_once()
+
+
+def test_rename_group_save_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = MagicMock(name="existing_group")
+    existing.mutableCopy.return_value = MagicMock(name="mutable_copy")
+    err = MagicMock(name="NSError(save)")
+    err.__str__.return_value = "rename boom"
+    _install_fake_contacts_for_group_crud(
+        monkeypatch,
+        fetched_group=existing,
+        save_succeeds=False,
+        fake_save_error=err,
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_rename_group("GRP-1", "X")
+    assert "CN group rename failed" in str(exc_info.value)
+    assert "rename boom" in str(exc_info.value)
+
+
+# ----- _run_cn_delete_group ---------------------------------------------------
+
+
+def test_delete_group_raises_not_found_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, save_req, _ = _install_fake_contacts_for_group_crud(
+        monkeypatch, fetched_group=None
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsNotFoundError):
+        connector._run_cn_delete_group("MISSING")
+    save_req.deleteGroup_.assert_not_called()
+    store.executeSaveRequest_error_.assert_not_called()
+
+
+def test_delete_group_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    existing = MagicMock(name="existing_group")
+    mutable_copy = MagicMock(name="mutable_copy")
+    existing.mutableCopy.return_value = mutable_copy
+    store, save_req, _ = _install_fake_contacts_for_group_crud(
+        monkeypatch, fetched_group=existing
+    )
+    connector = ContactsConnector()
+    result = connector._run_cn_delete_group("GRP-1:ABGroup")
+    assert result == "GRP-1:ABGroup"
+    save_req.deleteGroup_.assert_called_once_with(mutable_copy)
+    store.executeSaveRequest_error_.assert_called_once()
+
+
+def test_delete_group_save_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = MagicMock(name="existing_group")
+    existing.mutableCopy.return_value = MagicMock(name="mutable_copy")
+    err = MagicMock(name="NSError(save)")
+    err.__str__.return_value = "delete boom"
+    _install_fake_contacts_for_group_crud(
+        monkeypatch,
+        fetched_group=existing,
+        save_succeeds=False,
+        fake_save_error=err,
+    )
+    connector = ContactsConnector()
+    with pytest.raises(ContactsError) as exc_info:
+        connector._run_cn_delete_group("GRP-1")
+    assert "CN group delete failed" in str(exc_info.value)
+    assert "delete boom" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
 # _run_cn_list_containers
 # ---------------------------------------------------------------------------
 
