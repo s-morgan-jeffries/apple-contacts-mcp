@@ -193,7 +193,9 @@ def list_contacts(offset: int = 0, limit: int = 50) -> dict[str, Any]:
 
 
 @mcp.tool()
-def get_contact(identifier: str) -> dict[str, Any]:
+def get_contact(
+    identifier: str, include_niche: bool = False
+) -> dict[str, Any]:
     """Fetch a single contact by its CN identifier with all P1 fields.
 
     Get an identifier from ``list_contacts`` or ``search_contacts``, then
@@ -202,9 +204,17 @@ def get_contact(identifier: str) -> dict[str, Any]:
 
     Args:
         identifier: The contact's CN identifier (UUID-shaped string).
+        include_niche: When True, also fetch the P3 niche families
+            (``dates``, ``social_profiles``, ``relations``,
+            ``instant_messages``). Off by default — most contacts won't
+            have these populated and including them grows responses.
 
     Returns:
         On success: ``{"success": True, "contact": {...full P1 fields...}}``.
+        When ``include_niche=True``, the contact dict also contains
+        ``dates`` / ``social_profiles`` / ``relations`` / ``instant_messages``
+        keys (possibly empty lists). When False (default), those keys are
+        absent.
         On missing identifier (no such contact): ``{"success": False,
         "error_type": "not_found", "error": ...}``.
         On bad input (empty string): ``{"success": False, "error_type":
@@ -215,8 +225,9 @@ def get_contact(identifier: str) -> dict[str, Any]:
         "unknown", "error": ...}``.
 
     Each entry in the labeled-value families (phones, emails, urls,
-    postal_addresses) carries both ``label_raw`` (the
-    ``_$!<...>!$_`` token) and ``label`` (the human string).
+    postal_addresses, and the niche families when included) carries both
+    ``label_raw`` (the ``_$!<...>!$_`` token) and ``label`` (the human
+    string).
     """
     if not identifier or not identifier.strip():
         return {
@@ -230,7 +241,9 @@ def get_contact(identifier: str) -> dict[str, Any]:
         return auth_err
 
     try:
-        contact = connector._run_cn_unified_contact(identifier)
+        contact = connector._run_cn_unified_contact(
+            identifier, include_niche=include_niche
+        )
     except Exception as exc:
         logger.error("get_contact fetch failed: %s", exc)
         return {
@@ -548,6 +561,64 @@ def _validate_birthday(
     return None
 
 
+def _validate_dates(
+    dates: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    for i, d in enumerate(dates or []):
+        m = d.get("month")
+        day = d.get("day")
+        y = d.get("year")
+        if m is None and day is None and y is None:
+            return _validation_error(
+                f"dates[{i}] must set at least one of year/month/day"
+            )
+        if m is not None and not (1 <= m <= 12):
+            return _validation_error(f"dates[{i}].month must be 1-12")
+        if day is not None and not (1 <= day <= 31):
+            return _validation_error(f"dates[{i}].day must be 1-31")
+        if y is not None and y <= 0:
+            return _validation_error(
+                f"dates[{i}].year must be > 0 if set"
+            )
+    return None
+
+
+def _validate_social_profiles(
+    profiles: list[dict[str, str]] | None,
+) -> dict[str, Any] | None:
+    for i, p in enumerate(profiles or []):
+        username = (p.get("username") or "").strip()
+        url = (p.get("url") or "").strip()
+        if not username and not url:
+            return _validation_error(
+                f"social_profiles[{i}] must set at least one of "
+                f"username/url"
+            )
+    return None
+
+
+def _validate_relations(
+    relations: list[dict[str, str]] | None,
+) -> dict[str, Any] | None:
+    for i, r in enumerate(relations or []):
+        if not (r.get("name") or "").strip():
+            return _validation_error(
+                f"relations[{i}].name must be non-empty"
+            )
+    return None
+
+
+def _validate_instant_messages(
+    messages: list[dict[str, str]] | None,
+) -> dict[str, Any] | None:
+    for i, m in enumerate(messages or []):
+        if not (m.get("username") or "").strip():
+            return _validation_error(
+                f"instant_messages[{i}].username must be non-empty"
+            )
+    return None
+
+
 def _validate_labeled_value_fields(
     fields: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -559,6 +630,10 @@ def _validate_labeled_value_fields(
         or _validate_urls(fields.get("urls"))
         or _validate_postal_addresses(fields.get("postal_addresses"))
         or _validate_birthday(fields.get("birthday"))
+        or _validate_dates(fields.get("dates"))
+        or _validate_social_profiles(fields.get("social_profiles"))
+        or _validate_relations(fields.get("relations"))
+        or _validate_instant_messages(fields.get("instant_messages"))
     )
 
 
@@ -603,6 +678,10 @@ def create_contact(
     urls: list[dict[str, str]] | None = None,
     postal_addresses: list[dict[str, str]] | None = None,
     birthday: dict[str, int] | None = None,
+    dates: list[dict[str, Any]] | None = None,
+    social_profiles: list[dict[str, str]] | None = None,
+    relations: list[dict[str, str]] | None = None,
+    instant_messages: list[dict[str, str]] | None = None,
     group_identifier: str | None = None,
     container_identifier: str | None = None,
 ) -> dict[str, Any]:
@@ -673,6 +752,10 @@ def create_contact(
         "urls": urls or [],
         "postal_addresses": postal_addresses or [],
         "birthday": birthday,
+        "dates": dates or [],
+        "social_profiles": social_profiles or [],
+        "relations": relations or [],
+        "instant_messages": instant_messages or [],
     }
 
     validation_err = _validate_create_contact_input(fields)
@@ -748,6 +831,10 @@ def update_contact(
     urls: list[dict[str, str]] | None = None,
     postal_addresses: list[dict[str, str]] | None = None,
     birthday: dict[str, int] | None = None,
+    dates: list[dict[str, Any]] | None = None,
+    social_profiles: list[dict[str, str]] | None = None,
+    relations: list[dict[str, str]] | None = None,
+    instant_messages: list[dict[str, str]] | None = None,
     group_identifier: str | None = None,
 ) -> dict[str, Any]:
     """Update an existing contact by identifier with partial-field semantics.
@@ -799,6 +886,10 @@ def update_contact(
         ("urls", urls),
         ("postal_addresses", postal_addresses),
         ("birthday", birthday),
+        ("dates", dates),
+        ("social_profiles", social_profiles),
+        ("relations", relations),
+        ("instant_messages", instant_messages),
     ):
         if value is not None:
             fields[key] = value
