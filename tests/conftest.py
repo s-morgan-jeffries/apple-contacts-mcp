@@ -2,6 +2,12 @@
 
 import pytest
 
+# Register the integration-test session fixtures so benchmarks can reuse them.
+# Pytest 9 requires `pytest_plugins` to live in the top-level conftest, not in
+# subdirectory conftests. The fixtures only fire when requested — unit tests
+# don't reference them, so they remain a no-op for `make test`.
+pytest_plugins = ["tests.integration.conftest"]
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add custom command line options."""

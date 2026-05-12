@@ -1,0 +1,58 @@
+{
+  "test_create_then_delete_contact": {
+    "captured": "2026-05-12",
+    "median_ms": 235.17
+  },
+  "test_export_vcard_single": {
+    "captured": "2026-05-12",
+    "median_ms": 43.08
+  },
+  "test_get_contact": {
+    "captured": "2026-05-12",
+    "median_ms": 4.08
+  },
+  "test_get_contact_with_niche": {
+    "captured": "2026-05-12",
+    "median_ms": 5.96
+  },
+  "test_list_contacts_full_first_page": {
+    "captured": "2026-05-12",
+    "median_ms": 47.05
+  },
+  "test_list_contacts_page": {
+    "captured": "2026-05-12",
+    "median_ms": 45.63
+  },
+  "test_list_containers": {
+    "captured": "2026-05-12",
+    "median_ms": 5.56
+  },
+  "test_list_groups": {
+    "captured": "2026-05-12",
+    "median_ms": 49.79
+  },
+  "test_read_note_applescript": {
+    "captured": "2026-05-12",
+    "median_ms": 651.28
+  },
+  "test_read_photo_no_photo_set": {
+    "captured": "2026-05-12",
+    "median_ms": 3.86
+  },
+  "test_search_contacts_email": {
+    "captured": "2026-05-12",
+    "median_ms": 4.42
+  },
+  "test_search_contacts_name": {
+    "captured": "2026-05-12",
+    "median_ms": 21.74
+  },
+  "test_search_contacts_phone": {
+    "captured": "2026-05-12",
+    "median_ms": 4.02
+  },
+  "test_update_contact": {
+    "captured": "2026-05-12",
+    "median_ms": 15.09
+  }
+}
