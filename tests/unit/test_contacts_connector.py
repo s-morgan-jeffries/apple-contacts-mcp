@@ -671,6 +671,10 @@ def _make_full_contact(
     urls: list[MagicMock] | None = None,
     postal: list[MagicMock] | None = None,
     birthday: MagicMock | None = None,
+    dates: list[MagicMock] | None = None,
+    social_profiles: list[MagicMock] | None = None,
+    relations: list[MagicMock] | None = None,
+    instant_messages: list[MagicMock] | None = None,
 ) -> MagicMock:
     c = MagicMock(name=f"CNContact({cn_id})")
     c.identifier.return_value = cn_id
@@ -688,7 +692,35 @@ def _make_full_contact(
     c.urlAddresses.return_value = urls or []
     c.postalAddresses.return_value = postal or []
     c.birthday.return_value = birthday
+    c.dates.return_value = dates or []
+    c.socialProfiles.return_value = social_profiles or []
+    c.contactRelations.return_value = relations or []
+    c.instantMessageAddresses.return_value = instant_messages or []
     return c
+
+
+def _make_social_profile(
+    service: str = "", username: str = "", url: str = "", user_identifier: str = ""
+) -> MagicMock:
+    p = MagicMock(name=f"CNSocialProfile({service}:{username})")
+    p.service.return_value = service
+    p.username.return_value = username
+    p.urlString.return_value = url
+    p.userIdentifier.return_value = user_identifier
+    return p
+
+
+def _make_im_address(service: str = "", username: str = "") -> MagicMock:
+    im = MagicMock(name=f"CNInstantMessageAddress({service}:{username})")
+    im.service.return_value = service
+    im.username.return_value = username
+    return im
+
+
+def _make_relation(name: str = "") -> MagicMock:
+    r = MagicMock(name=f"CNContactRelation({name})")
+    r.name.return_value = name
+    return r
 
 
 def _install_fake_contacts_for_unified(
@@ -715,6 +747,12 @@ def _install_fake_contacts_for_unified(
         "CNContactPostalAddressesKey",
         "CNContactUrlAddressesKey",
         "CNContactBirthdayKey",
+        # P3 niche keys (only consulted when include_niche=True; harmless
+        # to provide unconditionally so the import doesn't fail).
+        "CNContactDatesKey",
+        "CNContactSocialProfilesKey",
+        "CNContactRelationsKey",
+        "CNContactInstantMessageAddressesKey",
     ):
         setattr(fake_module, k, k)
 
@@ -889,6 +927,93 @@ def test_unified_contact_birthday_all_components_zero_returns_none(
     result = connector._run_cn_unified_contact("ABCD")
     assert result is not None
     assert result["birthday"] is None
+
+
+def test_unified_contact_omits_niche_keys_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """include_niche=False (default) → the four niche keys are absent from
+    the response dict (opt-in semantics)."""
+    contact = _make_full_contact()
+    _install_fake_contacts_for_unified(monkeypatch, contact=contact)
+    connector = ContactsConnector()
+
+    result = connector._run_cn_unified_contact("ABCD")
+
+    assert result is not None
+    for k in ("dates", "social_profiles", "relations", "instant_messages"):
+        assert k not in result
+
+
+def test_unified_contact_includes_niche_keys_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contact = _make_full_contact(
+        dates=[_make_labeled("_$!<Anniversary>!$_", _make_birthday(year=2010, month=6, day=1))],
+        social_profiles=[
+            _make_labeled(
+                "_$!<Twitter>!$_",
+                _make_social_profile(
+                    service="Twitter", username="alice", url="https://t.example/alice"
+                ),
+            )
+        ],
+        relations=[_make_labeled("_$!<Spouse>!$_", _make_relation(name="Bob"))],
+        instant_messages=[
+            _make_labeled(
+                "_$!<Slack>!$_",
+                _make_im_address(service="Slack", username="alice"),
+            )
+        ],
+    )
+    store = _install_fake_contacts_for_unified(monkeypatch, contact=contact)
+    connector = ContactsConnector()
+
+    result = connector._run_cn_unified_contact("ABCD", include_niche=True)
+
+    assert result is not None
+    assert result["dates"] == [
+        {
+            "label_raw": "_$!<Anniversary>!$_",
+            "label": "_$!<Anniversary>!$_",
+            "year": 2010,
+            "month": 6,
+            "day": 1,
+        }
+    ]
+    assert result["social_profiles"] == [
+        {
+            "label_raw": "_$!<Twitter>!$_",
+            "label": "_$!<Twitter>!$_",
+            "service": "Twitter",
+            "username": "alice",
+            "url": "https://t.example/alice",
+            "user_identifier": "",
+        }
+    ]
+    assert result["relations"] == [
+        {
+            "label_raw": "_$!<Spouse>!$_",
+            "label": "_$!<Spouse>!$_",
+            "name": "Bob",
+        }
+    ]
+    assert result["instant_messages"] == [
+        {
+            "label_raw": "_$!<Slack>!$_",
+            "label": "_$!<Slack>!$_",
+            "service": "Slack",
+            "username": "alice",
+        }
+    ]
+
+    # And the fetched-keys list includes the niche key constants.
+    args, _ = store.unifiedContactWithIdentifier_keysToFetch_error_.call_args
+    fetched_keys = args[1]
+    assert "CNContactDatesKey" in fetched_keys
+    assert "CNContactSocialProfilesKey" in fetched_keys
+    assert "CNContactRelationsKey" in fetched_keys
+    assert "CNContactInstantMessageAddressesKey" in fetched_keys
 
 
 # ---------------------------------------------------------------------------
@@ -1234,6 +1359,26 @@ def _install_fake_contacts_for_create(
     cn_group_class.predicateForGroupsWithIdentifiers_.return_value = "GROUP_PRED"
     fake_contacts.CNGroup = cn_group_class  # type: ignore[attr-defined]
 
+    # P3 niche CN classes — used by the build path when the test exercises
+    # dates / social_profiles / relations / instant_messages fields.
+    cn_social_class = MagicMock(name="CNSocialProfile")
+    cn_social_class.alloc.return_value.initWithUrlString_username_userIdentifier_service_.side_effect = (
+        lambda url, username, uid, service: ("social_profile", url, username, uid, service)
+    )
+    fake_contacts.CNSocialProfile = cn_social_class  # type: ignore[attr-defined]
+
+    cn_relation_class = MagicMock(name="CNContactRelation")
+    cn_relation_class.contactRelationWithName_.side_effect = (
+        lambda n: ("relation", n)
+    )
+    fake_contacts.CNContactRelation = cn_relation_class  # type: ignore[attr-defined]
+
+    cn_im_class = MagicMock(name="CNInstantMessageAddress")
+    cn_im_class.alloc.return_value.initWithUsername_service_.side_effect = (
+        lambda username, service: ("im", username, service)
+    )
+    fake_contacts.CNInstantMessageAddress = cn_im_class  # type: ignore[attr-defined]
+
     cn_store_class = MagicMock(name="CNContactStore")
     store_instance = MagicMock(name="store_instance")
     if group_results is None:
@@ -1428,6 +1573,42 @@ def test_create_contact_with_birthday(monkeypatch: pytest.MonkeyPatch) -> None:
     mutable.setBirthday_.assert_called_once()
 
 
+def test_create_contact_with_niche_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise all four P3 niche build helpers in a single happy-path call.
+    Asserts the four setters fire (the labeled-value list shape is verified
+    indirectly via the fake CNLabeledValue tuple)."""
+    _, _, mutable_class, _ = _install_fake_contacts_for_create(monkeypatch)
+    connector = ContactsConnector()
+    connector._run_cn_create_contact(
+        fields={
+            "given_name": "Alice",
+            "dates": [
+                {"label": "anniversary", "year": 2010, "month": 6, "day": 1}
+            ],
+            "social_profiles": [
+                {
+                    "label": "twitter",
+                    "username": "alice",
+                    "service": "Twitter",
+                    "url": "https://t.example/alice",
+                }
+            ],
+            "relations": [{"label": "spouse", "name": "Bob"}],
+            "instant_messages": [
+                {"label": "slack", "username": "alice", "service": "Slack"}
+            ],
+        },
+        group_identifier=None,
+    )
+    mutable = mutable_class.alloc.return_value.init.return_value
+    mutable.setDates_.assert_called_once()
+    mutable.setSocialProfiles_.assert_called_once()
+    mutable.setContactRelations_.assert_called_once()
+    mutable.setInstantMessageAddresses_.assert_called_once()
+
+
 def test_create_contact_with_group_attaches_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1551,6 +1732,26 @@ def _install_fake_contacts_for_modify(
     cn_group_class.predicateForGroupsWithIdentifiers_.return_value = "GROUP_PRED"
     fake_contacts.CNGroup = cn_group_class  # type: ignore[attr-defined]
 
+    # P3 niche CN classes — used by the update path when the test exercises
+    # dates / social_profiles / relations / instant_messages fields.
+    cn_social_class = MagicMock(name="CNSocialProfile")
+    cn_social_class.alloc.return_value.initWithUrlString_username_userIdentifier_service_.side_effect = (
+        lambda url, username, uid, service: ("social_profile", url, username, uid, service)
+    )
+    fake_contacts.CNSocialProfile = cn_social_class  # type: ignore[attr-defined]
+
+    cn_relation_class = MagicMock(name="CNContactRelation")
+    cn_relation_class.contactRelationWithName_.side_effect = (
+        lambda n: ("relation", n)
+    )
+    fake_contacts.CNContactRelation = cn_relation_class  # type: ignore[attr-defined]
+
+    cn_im_class = MagicMock(name="CNInstantMessageAddress")
+    cn_im_class.alloc.return_value.initWithUsername_service_.side_effect = (
+        lambda username, service: ("im", username, service)
+    )
+    fake_contacts.CNInstantMessageAddress = cn_im_class  # type: ignore[attr-defined]
+
     cn_store_class = MagicMock(name="CNContactStore")
     store_instance = MagicMock(name="store_instance")
     if fetched_contact is None:
@@ -1670,6 +1871,62 @@ def test_update_contact_phones_replaces_with_supplied_list(
     mutable.setPhoneNumbers_.assert_called_once()
     args, _ = mutable.setPhoneNumbers_.call_args
     assert len(args[0]) == 1
+
+
+def test_update_contact_with_niche_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All four niche setters fire when each field is in the partial dict.
+    Mirrors the create-path niche test for the update path."""
+    fetched = MagicMock(name="CNContact_fetched")
+    _, mutable, _, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched
+    )
+    connector = ContactsConnector()
+    connector._run_cn_update_contact(
+        "ABCD",
+        {
+            "dates": [
+                {"label": "anniversary", "year": 2010, "month": 6, "day": 1}
+            ],
+            "social_profiles": [
+                {"label": "twitter", "username": "alice", "service": "Twitter"}
+            ],
+            "relations": [{"label": "spouse", "name": "Bob"}],
+            "instant_messages": [
+                {"label": "slack", "username": "alice", "service": "Slack"}
+            ],
+        },
+    )
+    mutable.setDates_.assert_called_once()
+    mutable.setSocialProfiles_.assert_called_once()
+    mutable.setContactRelations_.assert_called_once()
+    mutable.setInstantMessageAddresses_.assert_called_once()
+
+
+def test_update_contact_niche_empty_list_clears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per REST-PUT semantics, passing an empty list for a niche field
+    clears it (parallels phones=[])."""
+    fetched = MagicMock(name="CNContact_fetched")
+    _, mutable, _, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched
+    )
+    connector = ContactsConnector()
+    connector._run_cn_update_contact(
+        "ABCD",
+        {
+            "dates": [],
+            "social_profiles": [],
+            "relations": [],
+            "instant_messages": [],
+        },
+    )
+    mutable.setDates_.assert_called_once_with([])
+    mutable.setSocialProfiles_.assert_called_once_with([])
+    mutable.setContactRelations_.assert_called_once_with([])
+    mutable.setInstantMessageAddresses_.assert_called_once_with([])
 
 
 def test_update_contact_birthday_replaces(

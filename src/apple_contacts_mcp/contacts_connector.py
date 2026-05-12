@@ -1013,11 +1013,16 @@ class ContactsConnector:
         return identifier
 
     def _run_cn_unified_contact(
-        self, identifier: str
+        self, identifier: str, include_niche: bool = False
     ) -> dict[str, Any] | None:
         """Fetch a single contact by identifier with the full P1 key set.
 
         Returns the serialized dict, or None if no contact matches.
+
+        When ``include_niche`` is True, also fetches the four P3 niche
+        families (dates, social profiles, contact relations, instant
+        messages) and includes them in the response. Default False —
+        keeps responses compact for the common case.
         """
         from Contacts import (
             CNContactBirthdayKey,
@@ -1053,6 +1058,22 @@ class ContactsConnector:
             CNContactUrlAddressesKey,
             CNContactBirthdayKey,
         ]
+        if include_niche:
+            from Contacts import (
+                CNContactDatesKey,
+                CNContactInstantMessageAddressesKey,
+                CNContactRelationsKey,
+                CNContactSocialProfilesKey,
+            )
+
+            keys.extend(
+                [
+                    CNContactDatesKey,
+                    CNContactSocialProfilesKey,
+                    CNContactRelationsKey,
+                    CNContactInstantMessageAddressesKey,
+                ]
+            )
 
         store = self._get_store()
         contact, _err = store.unifiedContactWithIdentifier_keysToFetch_error_(
@@ -1060,7 +1081,7 @@ class ContactsConnector:
         )
         if contact is None:
             return None
-        return _serialize_contact(contact, CNLabeledValue)
+        return _serialize_contact(contact, CNLabeledValue, include_niche=include_niche)
 
     def _run_cn_request_access(self) -> bool:
         """Request TCC access to the Contacts entity. First `_run_cn_*` helper.
@@ -1182,7 +1203,91 @@ def _build_mutable_contact(fields: dict[str, Any]) -> Any:
     if bday := fields.get("birthday"):
         c.setBirthday_(_build_birthday_components(bday, NSDateComponents))
 
+    _apply_niche_fields_to_mutable(c, fields, NSDateComponents, CNLabeledValue)
+
     return c
+
+
+def _apply_niche_fields_to_mutable(
+    c: Any,
+    fields: dict[str, Any],
+    NSDateComponents: Any,
+    CNLabeledValue: Any,
+) -> None:
+    """Apply the four P3 niche labeled-value families to a mutable
+    contact. Truthy presence in ``fields`` triggers a setter; falsy /
+    absent leaves the field untouched.
+
+    Shared between ``_build_mutable_contact`` (create path) and
+    ``_apply_update_fields`` (update path) — both call this with the
+    same field-dict shape.
+    """
+    if dates := fields.get("dates"):
+        c.setDates_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    label_to_apple_token(d.get("label", "")),
+                    _build_birthday_components(d, NSDateComponents),
+                )
+                for d in dates
+            ]
+        )
+    if profiles := fields.get("social_profiles"):
+        c.setSocialProfiles_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    label_to_apple_token(p.get("label", "")),
+                    _build_social_profile(p),
+                )
+                for p in profiles
+            ]
+        )
+    if relations := fields.get("relations"):
+        c.setContactRelations_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    label_to_apple_token(r.get("label", "")),
+                    _build_contact_relation(r),
+                )
+                for r in relations
+            ]
+        )
+    if messages := fields.get("instant_messages"):
+        c.setInstantMessageAddresses_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    label_to_apple_token(m.get("label", "")),
+                    _build_im_address(m),
+                )
+                for m in messages
+            ]
+        )
+
+
+def _build_social_profile(p: dict[str, str]) -> Any:
+    from Contacts import CNSocialProfile
+
+    return CNSocialProfile.alloc().initWithUrlString_username_userIdentifier_service_(
+        p.get("url") or None,
+        p.get("username") or None,
+        p.get("user_identifier") or None,
+        p.get("service") or None,
+    )
+
+
+def _build_contact_relation(r: dict[str, str]) -> Any:
+    from Contacts import CNContactRelation
+
+    return CNContactRelation.contactRelationWithName_(r.get("name", ""))
+
+
+def _build_im_address(m: dict[str, str]) -> Any:
+    from Contacts import CNInstantMessageAddress
+
+    return CNInstantMessageAddress.alloc().initWithUsername_service_(
+        m.get("username", ""),
+        m.get("service") or None,
+    )
 
 
 def _build_mutable_postal_address(a: dict[str, str]) -> Any:
@@ -1295,14 +1400,62 @@ def _apply_update_fields(mutable: Any, fields: dict[str, Any]) -> None:
             _build_birthday_components(fields["birthday"], NSDateComponents)
         )
 
+    # Niche P3 families. Same presence semantics as the lists above —
+    # explicitly passing an empty list clears the field; omitting the key
+    # leaves it untouched.
+    if "dates" in fields:
+        from Foundation import NSDateComponents as _NSDC
+
+        mutable.setDates_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    label_to_apple_token(d.get("label", "")),
+                    _build_birthday_components(d, _NSDC),
+                )
+                for d in fields["dates"]
+            ]
+        )
+    if "social_profiles" in fields:
+        mutable.setSocialProfiles_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    label_to_apple_token(p.get("label", "")),
+                    _build_social_profile(p),
+                )
+                for p in fields["social_profiles"]
+            ]
+        )
+    if "relations" in fields:
+        mutable.setContactRelations_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    label_to_apple_token(r.get("label", "")),
+                    _build_contact_relation(r),
+                )
+                for r in fields["relations"]
+            ]
+        )
+    if "instant_messages" in fields:
+        mutable.setInstantMessageAddresses_(
+            [
+                CNLabeledValue.labeledValueWithLabel_value_(
+                    label_to_apple_token(m.get("label", "")),
+                    _build_im_address(m),
+                )
+                for m in fields["instant_messages"]
+            ]
+        )
+
 
 # ---------------------------------------------------------------------------
 # CNContact serializers (module-private)
 # ---------------------------------------------------------------------------
 
 
-def _serialize_contact(contact: Any, CNLabeledValue: Any) -> dict[str, Any]:
-    return {
+def _serialize_contact(
+    contact: Any, CNLabeledValue: Any, include_niche: bool = False
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
         "id": str(contact.identifier()),
         "given_name": str(contact.givenName()),
         "family_name": str(contact.familyName()),
@@ -1334,6 +1487,65 @@ def _serialize_contact(contact: Any, CNLabeledValue: Any) -> dict[str, Any]:
             _serialize_postal_address,
         ),
         "birthday": _serialize_birthday(contact.birthday()),
+    }
+    if include_niche:
+        out["dates"] = _serialize_labeled_values(
+            contact.dates(),
+            CNLabeledValue,
+            _serialize_date_components_value,
+        )
+        out["social_profiles"] = _serialize_labeled_values(
+            contact.socialProfiles(),
+            CNLabeledValue,
+            _serialize_social_profile,
+        )
+        out["relations"] = _serialize_labeled_values(
+            contact.contactRelations(),
+            CNLabeledValue,
+            lambda v: {"name": str(v.name())},
+        )
+        out["instant_messages"] = _serialize_labeled_values(
+            contact.instantMessageAddresses(),
+            CNLabeledValue,
+            _serialize_im_address,
+        )
+    return out
+
+
+def _serialize_date_components_value(dc: Any) -> dict[str, int]:
+    """Serialize an NSDateComponents value (from CNContactDatesKey entries)
+    to the same year/month/day shape as ``_serialize_birthday`` — but as a
+    flat sub-dict (no None envelope) since labeled-date values always carry
+    at least one component. Uses the same NSNotFound guard."""
+
+    def _safe(v: Any) -> int | None:
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return None
+        return n if 0 < n < 10_000 else None
+
+    out: dict[str, int] = {}
+    for attr in ("year", "month", "day"):
+        v = _safe(getattr(dc, attr)())
+        if v is not None:
+            out[attr] = v
+    return out
+
+
+def _serialize_social_profile(profile: Any) -> dict[str, str]:
+    return {
+        "service": str(profile.service()),
+        "username": str(profile.username()),
+        "url": str(profile.urlString()),
+        "user_identifier": str(profile.userIdentifier()),
+    }
+
+
+def _serialize_im_address(im: Any) -> dict[str, str]:
+    return {
+        "service": str(im.service()),
+        "username": str(im.username()),
     }
 
 

@@ -137,7 +137,9 @@ Error responses follow the [common error envelope](#error-types):
 Fetch a single contact by its CN identifier with all P1 fields.
 
 ```python
-def get_contact(identifier: str) -> dict[str, Any]
+def get_contact(
+    identifier: str, include_niche: bool = False
+) -> dict[str, Any]
 ```
 
 **Parameters:**
@@ -145,6 +147,7 @@ def get_contact(identifier: str) -> dict[str, Any]
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `identifier` | str | — | The contact's CN identifier (UUID-shaped string from `list_contacts` or `search_contacts`). Required, non-empty. |
+| `include_niche` | bool | False | When True, also fetches the P3 niche families (`dates`, `social_profiles`, `relations`, `instant_messages`). Off by default — most contacts won't have these populated and including them grows responses. |
 
 **Returns:**
 
@@ -177,6 +180,31 @@ def get_contact(identifier: str) -> dict[str, Any]
   }
 }
 ```
+
+With `include_niche=True`, the contact dict also contains four additional labeled-value families (always present when the flag is set, possibly as empty lists):
+
+```jsonc
+{
+  "dates": [
+    {"label_raw": "_$!<Anniversary>!$_", "label": "anniversary",
+     "year": 2010, "month": 6, "day": 1}
+  ],
+  "social_profiles": [
+    {"label_raw": "_$!<Twitter>!$_", "label": "Twitter",
+     "service": "Twitter", "username": "alice",
+     "url": "https://t.example/alice", "user_identifier": ""}
+  ],
+  "relations": [
+    {"label_raw": "_$!<Spouse>!$_", "label": "spouse", "name": "Bob"}
+  ],
+  "instant_messages": [
+    {"label_raw": "_$!<Slack>!$_", "label": "Slack",
+     "service": "Slack", "username": "alice"}
+  ]
+}
+```
+
+When `include_niche=False` (the default), these four keys are **absent** from the response — not `null`. Callers detect presence via `"dates" in contact`.
 
 When the identifier doesn't resolve:
 
@@ -293,6 +321,10 @@ def create_contact(
 | `urls` | list[dict] \| None | None | List of `{"label": str, "value": str}`. |
 | `postal_addresses` | list[dict] \| None | None | List of dicts with `label` + 8 postal sub-fields (`street`, `sub_locality`, `city`, `sub_administrative_area`, `state`, `postal_code`, `country`, `iso_country_code`). At least one geographic field must be non-empty. |
 | `birthday` | dict \| None | None | `{"year": int, "month": int, "day": int}` (any subset). Month 1-12, day 1-31. |
+| `dates` | list[dict] \| None | None | Custom labeled dates (e.g., anniversaries). List of `{"label": str, "year"?: int, "month"?: int, "day"?: int}` dicts (any subset; at least one of year/month/day must be set per entry). |
+| `social_profiles` | list[dict] \| None | None | List of `{"label": str, "service": str, "username": str, "url": str, "user_identifier": str}` dicts. At least one of `username`/`url` non-empty per entry. |
+| `relations` | list[dict] \| None | None | Contact relations (spouse/child/etc.). List of `{"label": str, "name": str}` dicts. `name` non-empty per entry. |
+| `instant_messages` | list[dict] \| None | None | List of `{"label": str, "service": str, "username": str}` dicts. `username` non-empty per entry. |
 | `group_identifier` | str \| None | None | If set, adds the new contact to this group atomically. **Required when `CONTACTS_TEST_MODE=true`** (must equal `CONTACTS_TEST_GROUP`). |
 | `container_identifier` | str \| None | None | If set, writes to this container instead of the user's default (typically iCloud). Use `list_containers` to find UUIDs. CN raises if the identifier is unknown — surfaces as `unknown`. |
 
@@ -352,6 +384,10 @@ def update_contact(
     urls: list[dict[str, str]] | None = None,
     postal_addresses: list[dict[str, str]] | None = None,
     birthday: dict[str, int] | None = None,
+    dates: list[dict[str, Any]] | None = None,
+    social_profiles: list[dict[str, str]] | None = None,
+    relations: list[dict[str, str]] | None = None,
+    instant_messages: list[dict[str, str]] | None = None,
     group_identifier: str | None = None,
 ) -> dict[str, Any]
 ```
@@ -368,6 +404,9 @@ def update_contact(
 | `phones=[{...}]` | **Replace** all phones (REST-PUT semantics, not append). |
 | `birthday=None` | Don't touch. |
 | `birthday={"month": 5}` | Replace components with the supplied subset. |
+| `dates=None` / `social_profiles=None` / `relations=None` / `instant_messages=None` | Don't touch. |
+| `dates=[]` (or any niche field `=[]`) | Replace with empty list (clear all). |
+| `dates=[{...}]` / etc. | **Replace** all entries (REST-PUT semantics). Per-entry shape matches `create_contact`. |
 
 `identifier` and `group_identifier` follow the same semantics as in `create_contact`. At least one mutating field must be supplied (besides `identifier` and `group_identifier`).
 

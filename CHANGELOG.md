@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `read_photo(identifier)` — read a contact's photo. Returns `{image_data: <base64>, format: "jpeg" | "png" | "gif" | "heic" | "unknown", size_bytes: N}` when a photo is set; `{image_data: null, format: null, size_bytes: 0}` when the contact exists but has no photo. The contact-not-found case dispatches `not_found` distinctly. Per the gap analysis gotcha, the connector always checks `imageDataAvailable()` before calling `imageData()` (#25).
 - `write_photo(identifier, image_data, group_identifier=None)` — set or clear a contact's photo via `setImageData_`. `image_data` is base64-encoded; `None` clears. Permissive on format — Apple is the authority on accepted bytes. Test-mode gated like `update_contact` (#25).
 - `detect_image_format(bytes) -> str` helper in `utils.py` — magic-byte detector returning one of `"jpeg"` / `"png"` / `"gif"` / `"heic"` / `"unknown"`. The HEIC bucket covers all HEIF-family ISOBMFF brands Apple emits. Pure function; no PyObjC dependency.
+- Four P3 niche labeled-value families wired through `get_contact` / `create_contact` / `update_contact`: `dates` (custom dates), `social_profiles`, `relations`, `instant_messages`. Each follows the existing labeled-value shape (`{label, label_raw, ...value fields}` on read; `{label, ...value fields}` on write). Per-entry validation: dates need ≥1 component in range; social profiles need ≥1 of username/url; relations need name; instant messages need username (#27).
+- `get_contact` gained an `include_niche: bool = False` parameter. When True, the four niche keys appear in the response (possibly as empty lists); when False (default), the keys are absent — keeps default responses compact (#27).
 
 ### Fixed
 

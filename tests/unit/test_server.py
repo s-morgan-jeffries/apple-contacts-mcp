@@ -306,7 +306,9 @@ class TestGetContactFound:
             mock_connector._run_cn_unified_contact.return_value = _FAKE_CONTACT_DICT
             result = get_contact("ABCD")
         assert result == {"success": True, "contact": _FAKE_CONTACT_DICT}
-        mock_connector._run_cn_unified_contact.assert_called_once_with("ABCD")
+        mock_connector._run_cn_unified_contact.assert_called_once_with(
+            "ABCD", include_niche=False
+        )
 
     def test_response_keys_are_minimal_on_success(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
@@ -626,6 +628,70 @@ class TestCreateContactValidation:
         assert result["error_type"] == "validation_error"
         mock_connector._run_cn_create_contact.assert_not_called()
 
+    def test_dates_entry_with_no_components_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = create_contact(
+                given_name="Alice", dates=[{"label": "anniversary"}]
+            )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "year/month/day" in result["error"]
+        mock_connector._run_cn_create_contact.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "date_entry",
+        [
+            {"month": 0, "day": 1},
+            {"month": 13, "day": 1},
+            {"month": 5, "day": 0},
+            {"month": 5, "day": 32},
+            {"year": -1, "month": 5, "day": 15},
+        ],
+    )
+    def test_dates_invalid_components_returns_validation_error(
+        self, date_entry: dict[str, int]
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = create_contact(given_name="Alice", dates=[date_entry])
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_create_contact.assert_not_called()
+
+    def test_social_profile_without_username_or_url_returns_validation_error(
+        self,
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = create_contact(
+                given_name="Alice",
+                social_profiles=[{"label": "twitter", "service": "Twitter"}],
+            )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        assert "username/url" in result["error"]
+        mock_connector._run_cn_create_contact.assert_not_called()
+
+    def test_relation_without_name_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = create_contact(
+                given_name="Alice",
+                relations=[{"label": "spouse"}],
+            )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_create_contact.assert_not_called()
+
+    def test_instant_message_without_username_returns_validation_error(
+        self,
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = create_contact(
+                given_name="Alice",
+                instant_messages=[{"label": "slack", "service": "Slack"}],
+            )
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_create_contact.assert_not_called()
+
 
 class TestCreateContactAuthFlow:
     def test_auth_denied_passthrough_skips_save(self) -> None:
@@ -749,6 +815,29 @@ class TestCreateContactHappyPath:
             "group_id",
             "container_id",
         }
+
+    def test_niche_fields_pass_through_to_connector(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_contact.return_value = "NEW-NICHE"
+            result = create_contact(
+                given_name="Alice",
+                dates=[{"label": "anniversary", "year": 2010, "month": 6, "day": 1}],
+                social_profiles=[
+                    {"label": "twitter", "username": "alice", "service": "Twitter"}
+                ],
+                relations=[{"label": "spouse", "name": "Bob"}],
+                instant_messages=[
+                    {"label": "slack", "username": "alice", "service": "Slack"}
+                ],
+            )
+        assert result["success"] is True
+        kwargs = mock_connector._run_cn_create_contact.call_args.kwargs
+        fields = kwargs["fields"]
+        assert fields["dates"][0]["year"] == 2010
+        assert fields["social_profiles"][0]["username"] == "alice"
+        assert fields["relations"][0]["name"] == "Bob"
+        assert fields["instant_messages"][0]["service"] == "Slack"
 
     def test_full_field_set_passes_through_to_connector(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
