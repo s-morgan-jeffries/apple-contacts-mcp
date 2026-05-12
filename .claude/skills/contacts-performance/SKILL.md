@@ -1,6 +1,6 @@
 ---
 name: contacts-performance
-description: Use when designing list/search/batch operations or chasing a slow tool. Establishes the empirical baselines from Phase 0 plus the patterns that hold for Contacts.framework specifically — most importantly the absence of subprocess overhead that makes mail-style perf advice misleading. Detailed per-tool baselines are tracked under issue #28 (v0.3.0).
+description: Use when designing list/search/batch operations or chasing a slow tool. Establishes the empirical baselines from Phase 0 plus the patterns that hold for Contacts.framework specifically — most importantly the absence of subprocess overhead that makes mail-style perf advice misleading.
 ---
 
 # Contacts performance patterns
@@ -18,7 +18,36 @@ The performance characteristics of `Contacts.framework` differ fundamentally fro
 | AppleScript `whose note is not ""` (over 1696) | **timed out at 60 s** | gap analysis §2 |
 | `CNContactVCardSerialization.dataWithContacts:error:` (1 contact) | <5 ms | empirical |
 
-**Observation:** the framework is consistently 4–6× faster than AppleScript for the same conceptual operation, and predicate-based filters are *orders of magnitude* faster than AppleScript loops over arbitrary properties. Per-tool baselines (single-contact read, predicate fetch with various result sizes, save round-trip, multi-contact vCard export) are still untaken; tracked under [issue #28](https://github.com/s-morgan-jeffries/apple-contacts-mcp/issues/28).
+**Observation:** the framework is consistently 4–6× faster than AppleScript for the same conceptual operation, and predicate-based filters are *orders of magnitude* faster than AppleScript loops over arbitrary properties.
+
+## Per-tool baselines (#28 / v0.3.0, macOS 26.x, M-series, ~1700-contact iCloud DB)
+
+Captured 2026-05-12 via `make benchmark-baseline`. Authoritative source: [`tests/benchmarks/baseline.json`](../../tests/benchmarks/baseline.json). Re-run on macOS major releases; per-op tolerance in CI is 3× (a slowdown beyond that fails `make benchmark`).
+
+| Operation | Median |
+|---|---:|
+| `list_contacts(limit=50)` | 46 ms |
+| `list_contacts(limit=200)` | 47 ms |
+| `search_contacts(name="a")` | 22 ms |
+| `search_contacts(phone="555")` | 4 ms |
+| `search_contacts(email="@")` | 4 ms |
+| `list_groups` | 50 ms |
+| `list_containers` | 6 ms |
+| `get_contact` (single) | 4 ms |
+| `get_contact(include_niche=True)` | 6 ms |
+| `update_contact` (one field) | 15 ms |
+| `create + delete` round-trip | 235 ms |
+| `export_vcard` (1 contact) | 43 ms |
+| `read_photo` (no photo set) | 4 ms |
+| `read_note` (AppleScript path) | 651 ms |
+
+**Highlights:**
+- **Predicate searches dominate by 5×** even after Phase 0: name search at 22 ms (substring match across thousands of contacts) is 5× the cost of a single `get_contact`; phone/email predicates at 4 ms are basically free because their key-domain is far smaller. **Always use predicates** — looping with `for c in all_contacts: if "x" in c.givenName()` over 1696 contacts costs O(N) framework round-trips.
+- **`list_contacts` (50 vs 200) is the same cost.** Pagination short-circuits via `stop_ptr[0] = True` but the per-callback serialization dominates over the early-exit savings until result-set is much smaller than enumeration.
+- **`list_groups` is surprisingly slow (50 ms)** for 8 groups — that's the N+1 container lookup per group. Worth optimizing only if user has 50+ groups; deferred.
+- **`include_niche=True` adds only ~2 ms** (4 → 6 ms) — the four extra keys cost almost nothing per-contact. Niche is opt-in for response-size reasons, not perf.
+- **Create+delete cycle costs 235 ms** vs a single `update_contact` at 15 ms. CN's save-then-immediately-delete pays an extra `unifiedContactWithIdentifier_keysToFetch_error_` lookup; the synthetic round-trip isn't representative of real workloads. Benchmarking a single side wasn't possible without leaking state into MCP-Test.
+- **AppleScript `read_note` at 651 ms** confirms the gap analysis number (200–400 ms subprocess + handshake overhead, plus contact-id resolution inside AppleScript). The framework path would be ~5 ms if Apple ever lifted the entitlement gate.
 
 ## Core pattern: predicates beat loops
 

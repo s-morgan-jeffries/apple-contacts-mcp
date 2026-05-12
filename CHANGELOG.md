@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `detect_image_format(bytes) -> str` helper in `utils.py` — magic-byte detector returning one of `"jpeg"` / `"png"` / `"gif"` / `"heic"` / `"unknown"`. The HEIC bucket covers all HEIF-family ISOBMFF brands Apple emits. Pure function; no PyObjC dependency.
 - Four P3 niche labeled-value families wired through `get_contact` / `create_contact` / `update_contact`: `dates` (custom dates), `social_profiles`, `relations`, `instant_messages`. Each follows the existing labeled-value shape (`{label, label_raw, ...value fields}` on read; `{label, ...value fields}` on write). Per-entry validation: dates need ≥1 component in range; social profiles need ≥1 of username/url; relations need name; instant messages need username (#27).
 - `get_contact` gained an `include_niche: bool = False` parameter. When True, the four niche keys appear in the response (possibly as empty lists); when False (default), the keys are absent — keeps default responses compact (#27).
+- Per-tool benchmark suite under [`tests/benchmarks/`](tests/benchmarks/) — 14 ops timed via `make benchmark` (compare) and `make benchmark-baseline` (capture). Opt-in via `--run-benchmark`; CI doesn't run them. Median timings committed under `tests/benchmarks/baseline.json`; compare mode asserts measured ≤ 3× baseline. Fills in the "per-tool baselines still untaken" gap left at Phase 0; `contacts-performance` skill now carries the captured numbers (#28).
 
 ### Fixed
 
