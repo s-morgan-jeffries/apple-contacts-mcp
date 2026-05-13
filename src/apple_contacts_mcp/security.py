@@ -200,9 +200,14 @@ async def _confirm_destructive(
     operation: str,
     entity_kind: str,
     identifier: str,
-    preview_lookup: Callable[[], dict[str, Any] | None]
-    | Callable[[], Awaitable[dict[str, Any] | None]],
-    describe: Callable[[dict[str, Any]], str],
+    # preview_lookup may return any framework-specific object (dict for
+    # contact previews, CNGroup for group previews) so we type its return
+    # as Any. `describe` consumes whatever preview_lookup returns and
+    # produces a human-readable string for the prompt. Mypy 2.x is strict
+    # enough to catch the previously-tolerated mismatch — using Any here
+    # is the smallest fix that preserves the existing call sites.
+    preview_lookup: Callable[[], Any] | Callable[[], Awaitable[Any]],
+    describe: Callable[[Any], str],
 ) -> dict[str, Any] | None:
     """Confirm a destructive op via FastMCP elicitation. Returns None when
     the user confirmed; an error dict otherwise.
@@ -247,9 +252,14 @@ async def _confirm_destructive(
     )
 
     try:
-        result = await ctx.elicit(
+        # mypy 2.x picks the `response_type: None` overload here instead of
+        # the `list[str]` one — FastMCP's overload set isn't ordered in a
+        # way mypy 2.x resolves correctly for list literals. The runtime
+        # behavior is correct (FastMCP dispatches on the actual type), so
+        # we silence the type-check noise rather than refactor around it.
+        result: Any = await ctx.elicit(
             prompt,
-            response_type=[_CONFIRM_YES, _CONFIRM_NO],
+            response_type=[_CONFIRM_YES, _CONFIRM_NO],  # type: ignore[arg-type]
             response_title=f"Confirm {operation}",
         )
     except Exception as exc:
