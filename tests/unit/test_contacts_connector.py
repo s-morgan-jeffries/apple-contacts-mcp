@@ -1697,6 +1697,11 @@ def _install_fake_contacts_for_modify(
         "CNContactUrlAddressesKey",
         "CNContactBirthdayKey",
         "CNContactIdentifierKey",
+        # P3 niche keys — fetched unconditionally so update can set them.
+        "CNContactDatesKey",
+        "CNContactSocialProfilesKey",
+        "CNContactRelationsKey",
+        "CNContactInstantMessageAddressesKey",
     ):
         setattr(fake_contacts, k, k)
 
@@ -1902,6 +1907,33 @@ def test_update_contact_with_niche_fields(
     mutable.setSocialProfiles_.assert_called_once()
     mutable.setContactRelations_.assert_called_once()
     mutable.setInstantMessageAddresses_.assert_called_once()
+
+
+def test_update_contact_fetches_all_p1_and_p3_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: CN raises CNPropertyNotFetchedException on setters for
+    keys that weren't fetched. The update path must request P1 + P3 keys
+    unconditionally so any partial-field update works. Caught by the
+    v0.3.0 release-gate review."""
+    fetched = MagicMock(name="CNContact_fetched")
+    store, _, _, _ = _install_fake_contacts_for_modify(
+        monkeypatch, fetched_contact=fetched
+    )
+    connector = ContactsConnector()
+    connector._run_cn_update_contact("ABCD", {"given_name": "X"})
+    args, _ = store.unifiedContactWithIdentifier_keysToFetch_error_.call_args
+    fetched_keys = args[1]
+    # The four niche keys must be present alongside the P1 set.
+    for required in (
+        "CNContactDatesKey",
+        "CNContactSocialProfilesKey",
+        "CNContactRelationsKey",
+        "CNContactInstantMessageAddressesKey",
+    ):
+        assert required in fetched_keys, (
+            f"{required} missing from update_contact keysToFetch"
+        )
 
 
 def test_update_contact_niche_empty_list_clears(
