@@ -1,6 +1,25 @@
 #!/bin/bash
-# Pre-push hook: run unit tests before every push.
+# Pre-push hook: run ruff lint + unit tests before every push.
+#
+# Mirrors CI exactly so a local pass guarantees a CI pass for these gates.
+# CI commands: `uv run ruff check src/ tests/` then `uv run pytest tests/...`.
+# Issue #79.
 set -euo pipefail
+
+echo "Running ruff lint before push..."
+
+if command -v uv &> /dev/null; then
+    if ! uv run ruff check src/ tests/; then
+        echo ""
+        echo "ERROR: ruff lint failed. Cannot push."
+        echo "Run 'uv run ruff check src/ tests/ --fix' to auto-fix import-order"
+        echo "and other simple issues, then 'git add' the result and re-push."
+        exit 1
+    fi
+    echo "Lint passed."
+else
+    echo "WARNING: uv not found; skipping ruff check. CI may still fail."
+fi
 
 echo "Running unit tests before push..."
 
