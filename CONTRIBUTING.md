@@ -9,6 +9,11 @@ uv sync --dev
 ./scripts/install-git-hooks.sh
 ```
 
+The pre-push hook runs `uv run ruff check src/ tests/` and the unit suite —
+same gates CI uses — so a successful push won't fail CI on a missed lint or
+test. If the lint step fails, `uv run ruff check src/ tests/ --fix` auto-fixes
+the import-order class of issues.
+
 ## Development Workflow
 
 0. **Before you start coding,** open an issue (or comment on an existing one) describing what you plan to fix or build. This lets us flag duplicate or in-flight work and saves you from rebases or wasted effort.
