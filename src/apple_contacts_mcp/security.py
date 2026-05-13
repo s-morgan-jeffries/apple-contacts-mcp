@@ -21,15 +21,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def sanitize_input(value: str) -> str:
-    """Strip control characters and normalize whitespace from user input.
-
-    Bootstrap stub: returns the input unchanged. Real implementation will
-    follow the playbook's two-step pattern (sanitize_input then escape).
-    """
-    return value
-
-
 # ---------------------------------------------------------------------------
 # Test-mode safety gate
 # ---------------------------------------------------------------------------
