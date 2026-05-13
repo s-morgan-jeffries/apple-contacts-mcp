@@ -35,12 +35,18 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
+        # `--notes` content is passed through an env var so the shell never
+        # sees the CHANGELOG body inlined. Inlining via `${{ ... }}` lets
+        # any backticks, $(...), or bare words in the release notes execute
+        # as shell — caught in v0.3.0's release when the niche-field
+        # examples broke the workflow.
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "Release $GITHUB_REF_NAME" \
-            --notes "${{ steps.changelog.outputs.notes }}"
+            --notes "$RELEASE_NOTES"
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES: ${{ steps.changelog.outputs.notes }}
 
       - name: Close milestone
         run: |
