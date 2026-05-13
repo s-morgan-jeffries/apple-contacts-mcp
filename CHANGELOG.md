@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Authorization revocation mid-process is now caught.** Every data tool already re-checked TCC status on entry; v0.4.0 adds `_verify_authorization_still_granted()` as a post-call check that closes the race window. For read tools (`list_contacts`, `search_contacts`, `get_contact`, `list_groups`, `get_contacts_in_group`, `list_containers`), suspicious results (empty list, None contact) now trigger a status re-check before being dispatched as empty or `not_found`. For destructive tools (`create_contact`, `update_contact`, `delete_contact`, `create_group`, `rename_group`, `delete_group`, `write_note`, `write_photo`, `add_contact_to_group`, `remove_contact_from_group`, `import_vcard`), the post-call check runs unconditionally — if TCC was revoked during the save, the persistence is undefined and the caller now learns about it via `authorization_denied` instead of a misleading `success: true`. Closes gap-analysis Q6; #37.
+- TOOLS.md error-types appendix entry for `authorization_denied` updated to document the two surfacing points (entry-check and post-call).
+- New manual integration runbook at `tests/integration/test_authorization_revocation.md` — TCC revocation isn't scriptable from CI, so this documents the procedure for verifying real-CN behavior after auth-related changes.
 - `delete_contact` and `delete_group` are now `async` and accept the FastMCP `Context` so they can elicit confirmation from the user. Outside test mode they prompt with `Delete <kind> '<name>' (<id>)? This cannot be undone.` (Yes / No); inside test mode the existing test-group safety gate applies unchanged. The entity name is pre-fetched so the prompt isn't an opaque UUID; a missing identifier short-circuits to `not_found` without prompting. New `_confirm_destructive` helper in `security.py` centralizes the elicitation logic and the unsupported-client fallback (#36).
 
 ### Added

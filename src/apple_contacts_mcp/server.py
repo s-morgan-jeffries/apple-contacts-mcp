@@ -90,6 +90,51 @@ def check_authorization() -> dict[str, Any]:
     return response
 
 
+def _verify_authorization_still_granted() -> dict[str, Any] | None:
+    """Post-call auth verification — returns None if still authorized,
+    otherwise the same ``authorization_denied`` error dict shape as
+    ``_require_contacts_authorization``.
+
+    Used after CN calls that return suspicious-but-non-erroring results
+    (empty list, ``None`` contact) to distinguish a genuine empty result
+    from mid-call TCC revocation. Also called unconditionally after
+    destructive ops — if TCC was revoked between save start and finish,
+    the persistence is undefined and the caller needs to know.
+
+    Cheap (~1 ms): just calls ``_run_cn_authorization_status()`` and
+    checks against the authorized/limited set. Does **not** trigger the
+    request-access prompt — if the user just revoked, prompting again
+    would be hostile; respect their choice and report the state.
+
+    Issue: #37, closes gap analysis §6 Q6.
+    """
+    try:
+        status = connector._run_cn_authorization_status()
+    except Exception as exc:
+        logger.error("post-call authorization check failed: %s", exc)
+        return {
+            "success": False,
+            "error": f"Failed to re-check TCC status: {exc}",
+            "error_type": "unknown",
+        }
+    if status in ("authorized", "limited"):
+        return None
+    return {
+        "success": False,
+        "status": status,
+        "error": (
+            f"Contacts access was revoked during the call (status={status}). "
+            f"For destructive operations, the persistence of any change is "
+            f"undefined; verify state via a read tool after re-authorizing."
+        ),
+        "error_type": "authorization_denied",
+        "remediation": _AUTH_REMEDIATION.get(
+            status,
+            "Open System Settings → Privacy & Security → Contacts.",
+        ),
+    }
+
+
 def _require_contacts_authorization() -> dict[str, Any] | None:
     """Returns None if access is granted; otherwise an error dict to return.
 
@@ -188,6 +233,15 @@ def list_contacts(offset: int = 0, limit: int = 50) -> dict[str, Any]:
             "error_type": "unknown",
         }
 
+    # Defense-in-depth: an empty result could be a genuinely empty page
+    # OR mid-call TCC revocation (Apple's enumerate can succeed silently
+    # post-revocation). Re-check status to disambiguate. Cheap (~1 ms);
+    # only paid on empty results. Issue #37.
+    if not contacts:
+        auth_revoked = _verify_authorization_still_granted()
+        if auth_revoked is not None:
+            return auth_revoked
+
     return {
         "success": True,
         "contacts": contacts,
@@ -258,6 +312,12 @@ def get_contact(
         }
 
     if contact is None:
+        # `None` could be genuinely-not-found OR mid-call TCC revocation
+        # (unifiedContactWithIdentifier returns None for both cases). Re-check
+        # status to disambiguate before dispatching not_found. Issue #37.
+        auth_revoked = _verify_authorization_still_granted()
+        if auth_revoked is not None:
+            return auth_revoked
         return {
             "success": False,
             "error": f"No contact found with identifier {identifier!r}",
@@ -350,6 +410,11 @@ def search_contacts(
             "error_type": "unknown",
         }
 
+    if not contacts:
+        auth_revoked = _verify_authorization_still_granted()
+        if auth_revoked is not None:
+            return auth_revoked
+
     return {
         "success": True,
         "contacts": contacts,
@@ -398,6 +463,10 @@ def list_containers() -> dict[str, Any]:
         }
 
     capped = containers[:_LIST_CONTAINERS_MAX]
+    if not capped:
+        auth_revoked = _verify_authorization_still_granted()
+        if auth_revoked is not None:
+            return auth_revoked
     return {
         "success": True,
         "containers": capped,
@@ -438,6 +507,10 @@ def list_groups() -> dict[str, Any]:
         }
 
     capped = groups[:_LIST_GROUPS_MAX]
+    if not capped:
+        auth_revoked = _verify_authorization_still_granted()
+        if auth_revoked is not None:
+            return auth_revoked
     return {
         "success": True,
         "groups": capped,
@@ -494,6 +567,11 @@ def get_contacts_in_group(identifier: str) -> dict[str, Any]:
             "error": f"get_contacts_in_group failed: {exc}",
             "error_type": "unknown",
         }
+
+    if not contacts:
+        auth_revoked = _verify_authorization_still_granted()
+        if auth_revoked is not None:
+            return auth_revoked
 
     return {
         "success": True,
@@ -797,6 +875,12 @@ def create_contact(
             "error_type": "unknown",
         }
 
+    # Destructive op: verify TCC wasn't revoked mid-save. If it was, the
+    # persistence is undefined — tell the caller. Issue #37.
+    auth_revoked = _verify_authorization_still_granted()
+    if auth_revoked is not None:
+        return auth_revoked
+
     return {
         "success": True,
         "identifier": identifier,
@@ -929,6 +1013,10 @@ def update_contact(
             "error_type": "unknown",
         }
 
+    auth_revoked = _verify_authorization_still_granted()
+    if auth_revoked is not None:
+        return auth_revoked
+
     return {"success": True, "identifier": identifier}
 
 
@@ -1013,6 +1101,10 @@ async def delete_contact(
             "error": f"Delete failed: {exc}",
             "error_type": "unknown",
         }
+
+    auth_revoked = _verify_authorization_still_granted()
+    if auth_revoked is not None:
+        return auth_revoked
 
     return {"success": True, "identifier": identifier}
 
@@ -1167,6 +1259,10 @@ def import_vcard(
             "error_type": "unknown",
         }
 
+    auth_revoked = _verify_authorization_still_granted()
+    if auth_revoked is not None:
+        return auth_revoked
+
     return {
         "success": True,
         "identifiers": identifiers,
@@ -1279,6 +1375,10 @@ def write_note(
             "error": f"write_note failed: {exc}",
             "error_type": "unknown",
         }
+
+    auth_revoked = _verify_authorization_still_granted()
+    if auth_revoked is not None:
+        return auth_revoked
 
     return {"success": True, "identifier": identifier}
 
@@ -1428,6 +1528,10 @@ def write_photo(
             "error_type": "unknown",
         }
 
+    auth_revoked = _verify_authorization_still_granted()
+    if auth_revoked is not None:
+        return auth_revoked
+
     return {"success": True, "identifier": identifier}
 
 
@@ -1498,6 +1602,10 @@ def add_contact_to_group(
             "error_type": "unknown",
         }
 
+    auth_revoked = _verify_authorization_still_granted()
+    if auth_revoked is not None:
+        return auth_revoked
+
     return {
         "success": True,
         "contact_identifier": contact_identifier,
@@ -1567,6 +1675,10 @@ def remove_contact_from_group(
             "error_type": "unknown",
         }
 
+    auth_revoked = _verify_authorization_still_granted()
+    if auth_revoked is not None:
+        return auth_revoked
+
     return {
         "success": True,
         "contact_identifier": contact_identifier,
@@ -1632,6 +1744,10 @@ def create_group(
             "error_type": "unknown",
         }
 
+    auth_revoked = _verify_authorization_still_granted()
+    if auth_revoked is not None:
+        return auth_revoked
+
     return {"success": True, "group": group}
 
 
@@ -1695,6 +1811,10 @@ def rename_group(
             "error": f"rename_group failed: {exc}",
             "error_type": "unknown",
         }
+
+    auth_revoked = _verify_authorization_still_granted()
+    if auth_revoked is not None:
+        return auth_revoked
 
     return {"success": True, "group": group}
 
@@ -1778,6 +1898,10 @@ async def delete_group(
             "error": f"delete_group failed: {exc}",
             "error_type": "unknown",
         }
+
+    auth_revoked = _verify_authorization_still_granted()
+    if auth_revoked is not None:
+        return auth_revoked
 
     return {"success": True, "identifier": identifier}
 
