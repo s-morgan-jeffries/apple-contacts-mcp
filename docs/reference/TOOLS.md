@@ -2,7 +2,7 @@
 
 Reference for every MCP tool the apple-contacts-mcp server exposes.
 
-**Version:** v0.2.1 (tracks the package version)
+**Version:** v0.3.0 (tracks the package version)
 **Tools:** 21
 
 The source-of-truth for tool behavior is the docstrings in
@@ -299,7 +299,12 @@ def create_contact(
     urls: list[dict[str, str]] | None = None,
     postal_addresses: list[dict[str, str]] | None = None,
     birthday: dict[str, int] | None = None,
+    dates: list[dict[str, Any]] | None = None,
+    social_profiles: list[dict[str, str]] | None = None,
+    relations: list[dict[str, str]] | None = None,
+    instant_messages: list[dict[str, str]] | None = None,
     group_identifier: str | None = None,
+    container_identifier: str | None = None,
 ) -> dict[str, Any]
 ```
 
@@ -1008,7 +1013,7 @@ Common envelope:
 |---|---|---|
 | `validation_error` | Caller violated the input contract — bad type, bad shape, empty required field, out-of-range birthday, email without `@`, etc. | — |
 | `authorization_denied` | TCC blocked the operation. The LLM should call `check_authorization` to disambiguate (`notDetermined` / `denied` / `restricted`) and surface `remediation` to the user. | `status`, `remediation` |
-| `safety_violation` | The destructive-op gate refused: either `CONTACTS_TEST_MODE=true` was set without a matching `group_identifier`, or `delete_contact` was called outside test mode. | — |
+| `safety_violation` | The destructive-op gate refused: either `CONTACTS_TEST_MODE=true` was set without a matching `group_identifier`, or `delete_contact` / `delete_group` was called outside test mode. | — |
 | `not_found` | A referenced CN object (contact identifier or `group_identifier`) doesn't exist in the unified store. | — |
 | `unknown` | Anything else — usually a CN save failure or an unexpected PyObjC error. The `error` field has the underlying message. | — |
 

@@ -1,11 +1,15 @@
 # Apple Contacts MCP Server
 
-**Version:** v0.2.1
+**Version:** v0.3.0
 
-v0.2.1 is a patch release covering release-gate follow-ups from v0.2.0:
-fixes the `check_complexity.sh` script and refactors the validators it
-flagged, and aligns `create_contact`'s success response with `import_vcard`
-on `group_id` shape (always present, `null` when no group). See
+v0.3.0 ships the Phase 3 surface: containers (`list_containers` +
+`container_identifier` on `create_contact`), group CRUD (`create_group`,
+`rename_group`, `delete_group`), contact photo read/write with magic-byte
+format detection (`read_photo`, `write_photo`), and four niche labeled-value
+families (`dates`, `social_profiles`, `relations`, `instant_messages`) opt-in
+via `include_niche=True` on `get_contact`. Also closes gap-analysis Q8a
+(multi-container write round-trip empirically resolved) and lands the
+per-tool performance baselines suite. See
 [docs/reference/TOOLS.md](../docs/reference/TOOLS.md) for the API surface
 and [CHANGELOG.md](../CHANGELOG.md) for release notes.
 

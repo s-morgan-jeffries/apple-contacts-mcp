@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-12
+
+Phase 3 release. Six issues closed: container-aware tools (#26), photo read/write (#25), group CRUD (#24), niche fields (#27), per-tool performance baselines (#28), and the multi-container write round-trip research (#29). Plus a release-gate cleanup PR (#73) clearing pre-existing IDE lint/schema warnings. Tool count: 16 → **21**.
+
+### Fixed
+
+- `_run_cn_update_contact` now fetches the four P3 niche keys (`CNContactDatesKey`, `CNContactSocialProfilesKey`, `CNContactRelationsKey`, `CNContactInstantMessageAddressesKey`) so partial-field updates of any niche field don't trigger `CNPropertyNotFetchedException` at the setter. Caught in the v0.3.0 release-gate review. Locked in by a regression test that asserts the keysToFetch list contains all four.
+
+### Security
+
+- Bumped transitive dependency urllib3 2.6.3 → 2.7.0 (CVE-2026-44431, CVE-2026-44432). Pulled in via requests; no direct caller affected, but the release-gate dependency scan caught it.
+
 ### Added
 
 - `list_containers` — enumerate contact containers (accounts: iCloud, Gmail, Exchange, On-My-Mac). Returns `{id, name, type, is_default}` per entry, capped at 10. `type` is one of `"local"` / `"exchange"` / `"cardDAV"` (even iCloud reports as `cardDAV` — the sync protocol). `is_default` flags the container new contacts go into when `container_identifier` isn't specified (#26).

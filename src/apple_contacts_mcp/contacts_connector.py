@@ -598,10 +598,12 @@ class ContactsConnector:
         """
         from Contacts import (
             CNContactBirthdayKey,
+            CNContactDatesKey,
             CNContactDepartmentNameKey,
             CNContactEmailAddressesKey,
             CNContactFamilyNameKey,
             CNContactGivenNameKey,
+            CNContactInstantMessageAddressesKey,
             CNContactJobTitleKey,
             CNContactMiddleNameKey,
             CNContactNamePrefixKey,
@@ -610,10 +612,16 @@ class ContactsConnector:
             CNContactOrganizationNameKey,
             CNContactPhoneNumbersKey,
             CNContactPostalAddressesKey,
+            CNContactRelationsKey,
+            CNContactSocialProfilesKey,
             CNContactUrlAddressesKey,
             CNSaveRequest,
         )
 
+        # Fetch the full P1 + P3 key set. CN raises CNPropertyNotFetchedException
+        # on any setter for a key that wasn't fetched, so an incomplete keys list
+        # would break partial updates of any niche field. The extra fetch cost is
+        # negligible vs. correctness.
         keys = [
             CNContactGivenNameKey,
             CNContactFamilyNameKey,
@@ -629,6 +637,10 @@ class ContactsConnector:
             CNContactPostalAddressesKey,
             CNContactUrlAddressesKey,
             CNContactBirthdayKey,
+            CNContactDatesKey,
+            CNContactSocialProfilesKey,
+            CNContactRelationsKey,
+            CNContactInstantMessageAddressesKey,
         ]
 
         store = self._get_store()

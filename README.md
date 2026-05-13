@@ -2,7 +2,7 @@
 
 A Model Context Protocol server for Apple Contacts on macOS.
 
-**Version:** v0.2.1 — patch release covering release-gate follow-ups from v0.2.0 (complexity-script fix + `create_contact` / `import_vcard` `group_id` response shape alignment). The full v0.2.0 surface (field-scoped search, group read/write, note read/write, vCard import/export) ships unchanged. See [docs/reference/TOOLS.md](docs/reference/TOOLS.md) for the API surface and [CHANGELOG.md](CHANGELOG.md) for release notes.
+**Version:** v0.3.0 — Phase 3 surface: containers, group CRUD, contact photos, niche fields. 21 tools total. See [docs/reference/TOOLS.md](docs/reference/TOOLS.md) for the API surface and [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Tools
 
@@ -12,7 +12,7 @@ A Model Context Protocol server for Apple Contacts on macOS.
 - `search_contacts` — predicate by name, phone, email, or organization.
 - `create_contact` — write via `CNSaveRequest`.
 - `update_contact` — partial-field update.
-- `delete_contact` — test-mode-only in v0.2.x; full destructive UX ships in v0.4.0.
+- `delete_contact` — test-mode-only until v0.4.0 ships the full destructive UX with confirmation prompts.
 - `read_note` / `write_note` — note field via AppleScript fallback (entitlement-gated in CN).
 - `read_photo` / `write_photo` — contact photo as base64-encoded bytes; read returns the detected format (JPEG/PNG/HEIC/GIF).
 - `list_groups` / `get_contacts_in_group` — group read.
