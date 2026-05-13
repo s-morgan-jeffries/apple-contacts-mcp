@@ -8,7 +8,6 @@ import logging
 from typing import Any, cast
 
 from fastmcp import FastMCP
-
 from fastmcp.server.context import Context
 
 from .contacts_connector import ContactsConnector, SearchField
