@@ -128,6 +128,7 @@ The fallback path runs `osascript` as a subprocess — **expect 200–400 ms of 
 **Strategy:** for note-heavy tools, batch by enumerating contacts via `Contacts.framework` first (fast), then make N AppleScript calls only for the contacts the tool actually returns. Never iterate AppleScript over every contact.
 
 If you find yourself wanting to filter by note content (`whose note contains "..."`), don't — the predicate times out as documented above. Either:
+
 1. Feature-flag the search and bail with a clear error
 2. Mass-fetch notes via AppleScript into a side-cache and search the cache (only feasible for small contact counts, which contradicts why you'd want to filter in the first place)
 
@@ -154,6 +155,7 @@ Per `tests/conftest.py`, benchmark tests are opt-in via `--run-benchmark` so the
 ## When to revisit
 
 Re-profile when:
+
 - Apple ships a major macOS release (re-run baselines)
 - Contact counts in the test rig differ by 5×+ from the 1696-contact baseline
 - A tool ships that the original baselines didn't cover (per-op baseline added under issue #28)
