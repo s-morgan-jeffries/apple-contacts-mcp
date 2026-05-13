@@ -15,6 +15,7 @@ from apple_contacts_mcp.exceptions import (
 )
 from apple_contacts_mcp.security import _get_test_group_identifiers
 from apple_contacts_mcp.server import (
+    _verify_authorization_still_granted,
     add_contact_to_group,
     check_authorization,
     create_contact,
@@ -37,7 +38,6 @@ from apple_contacts_mcp.server import (
     write_note,
     write_photo,
 )
-from apple_contacts_mcp.server import _verify_authorization_still_granted
 
 
 class TestCheckAuthorization:
