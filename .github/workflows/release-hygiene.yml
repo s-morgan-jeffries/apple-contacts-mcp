@@ -20,6 +20,7 @@ jobs:
       - run: uv sync --dev
 
       - name: Unit tests
+        id: unit-tests
         run: uv run pytest tests/ -m "not integration and not e2e and not benchmark" -v --tb=short
 
       - name: Version sync check

@@ -41,7 +41,8 @@ Captured 2026-05-12 via `make benchmark-baseline`. Authoritative source: [`tests
 | `read_photo` (no photo set) | 4 ms |
 | `read_note` (AppleScript path) | 651 ms |
 
-**Highlights:**
+### Highlights
+
 - **Predicate searches dominate by 5×** even after Phase 0: name search at 22 ms (substring match across thousands of contacts) is 5× the cost of a single `get_contact`; phone/email predicates at 4 ms are basically free because their key-domain is far smaller. **Always use predicates** — looping with `for c in all_contacts: if "x" in c.givenName()` over 1696 contacts costs O(N) framework round-trips.
 - **`list_contacts` (50 vs 200) is the same cost.** Pagination short-circuits via `stop_ptr[0] = True` but the per-callback serialization dominates over the early-exit savings until result-set is much smaller than enumeration.
 - **`list_groups` is surprisingly slow (50 ms)** for 8 groups — that's the N+1 container lookup per group. Worth optimizing only if user has 50+ groups; deferred.
