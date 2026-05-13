@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `delete_contact` and `delete_group` are now `async` and accept the FastMCP `Context` so they can elicit confirmation from the user. Outside test mode they prompt with `Delete <kind> '<name>' (<id>)? This cannot be undone.` (Yes / No); inside test mode the existing test-group safety gate applies unchanged. The entity name is pre-fetched so the prompt isn't an opaque UUID; a missing identifier short-circuits to `not_found` without prompting. New `_confirm_destructive` helper in `security.py` centralizes the elicitation logic and the unsupported-client fallback (#36).
+
+### Added
+
+- `user_declined` error type for the two delete tools when the user declines or cancels the confirmation prompt. Documented in TOOLS.md's error-types appendix.
+
+### Removed
+
+- `require_test_mode_for` is no longer wired into any tool. The helper remains in `security.py` for forward-compatibility but the v0.1.0–v0.3.x posture of "destructive ops refuse outright outside test mode" has been replaced by the elicitation flow. Clients that don't support elicitation fall back to a clear `safety_violation` pointing at `CONTACTS_TEST_MODE` (#36).
+
 ## [0.3.0] - 2026-05-12
 
 Phase 3 release. Six issues closed: container-aware tools (#26), photo read/write (#25), group CRUD (#24), niche fields (#27), per-tool performance baselines (#28), and the multi-container write round-trip research (#29). Plus a release-gate cleanup PR (#73) clearing pre-existing IDE lint/schema warnings. Tool count: 16 → **21**.

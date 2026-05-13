@@ -12,12 +12,12 @@ A Model Context Protocol server for Apple Contacts on macOS.
 - `search_contacts` — predicate by name, phone, email, or organization.
 - `create_contact` — write via `CNSaveRequest`.
 - `update_contact` — partial-field update.
-- `delete_contact` — test-mode-only until v0.4.0 ships the full destructive UX with confirmation prompts.
+- `delete_contact` — out-of-band confirmation via FastMCP elicitation outside test mode; refuses gracefully on clients without elicit support.
 - `read_note` / `write_note` — note field via AppleScript fallback (entitlement-gated in CN).
 - `read_photo` / `write_photo` — contact photo as base64-encoded bytes; read returns the detected format (JPEG/PNG/HEIC/GIF).
 - `list_groups` / `get_contacts_in_group` — group read.
 - `add_contact_to_group` / `remove_contact_from_group` — group membership.
-- `create_group` / `rename_group` / `delete_group` — group CRUD. `delete_group` is test-mode-only in v0.3.x; full destructive UX with confirmation prompts ships in v0.4.0.
+- `create_group` / `rename_group` / `delete_group` — group CRUD. `delete_group` uses the same elicitation-confirmation flow as `delete_contact`.
 - `export_vcard` / `import_vcard` — vCard 3.0 serialization round-trip.
 - `list_containers` — list accounts (iCloud, Gmail, Exchange, On-My-Mac). Pair with `create_contact(..., container_identifier=...)` to write to a non-default container.
 

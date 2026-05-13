@@ -11,8 +11,12 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+from collections.abc import Awaitable, Callable
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from fastmcp.server.context import Context
 
 logger = logging.getLogger(__name__)
 
@@ -185,4 +189,113 @@ def _safety_error(operation: str, message: str) -> dict[str, Any]:
         "success": False,
         "error": message,
         "error_type": "safety_violation",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Destructive-op confirmation UX (FastMCP elicitation)
+# ---------------------------------------------------------------------------
+
+# The two yes/no choices presented to the user. The exact strings are part
+# of the protocol — `_confirm_destructive` matches on `_CONFIRM_YES` to
+# decide whether to proceed.
+_CONFIRM_YES = "Yes, delete"
+_CONFIRM_NO = "No, cancel"
+
+
+async def _confirm_destructive(
+    ctx: Context,
+    *,
+    operation: str,
+    entity_kind: str,
+    identifier: str,
+    preview_lookup: Callable[[], dict[str, Any] | None]
+    | Callable[[], Awaitable[dict[str, Any] | None]],
+    describe: Callable[[dict[str, Any]], str],
+) -> dict[str, Any] | None:
+    """Confirm a destructive op via FastMCP elicitation. Returns None when
+    the user confirmed; an error dict otherwise.
+
+    Flow:
+      1. Pre-fetch the target entity via ``preview_lookup`` so the prompt
+         shows a human-readable preview. Lookup returning ``None`` short-
+         circuits to a ``not_found`` response without prompting.
+      2. Call ``ctx.elicit()`` with a two-option choice. The accepted result
+         must be ``_CONFIRM_YES`` to proceed; anything else (including
+         declined / cancelled) returns ``user_declined``.
+      3. If the client doesn't support elicitation, ``ctx.elicit()`` raises.
+         Catch broadly and return ``safety_violation`` pointing at test mode
+         as the bypass — same posture as the v0.1.0+ test-mode gate.
+    """
+    from fastmcp.server.elicitation import (
+        AcceptedElicitation,
+        CancelledElicitation,
+        DeclinedElicitation,
+    )
+
+    try:
+        preview = preview_lookup()
+    except Exception as exc:
+        logger.error("%s confirmation preview failed: %s", operation, exc)
+        return {
+            "success": False,
+            "error": f"{operation} preview failed: {exc}",
+            "error_type": "unknown",
+        }
+    if preview is None:
+        return {
+            "success": False,
+            "error": f"{entity_kind.capitalize()} not found: {identifier!r}",
+            "error_type": "not_found",
+        }
+
+    description = describe(preview)
+    prompt = (
+        f"Delete {entity_kind} {description!r} ({identifier})? "
+        f"This cannot be undone."
+    )
+
+    try:
+        result = await ctx.elicit(
+            prompt,
+            response_type=[_CONFIRM_YES, _CONFIRM_NO],
+            response_title=f"Confirm {operation}",
+        )
+    except Exception as exc:
+        logger.warning(
+            "%s elicitation failed (client may not support elicit): %s",
+            operation,
+            exc,
+        )
+        return _safety_error(
+            operation,
+            f"{operation} requires user confirmation, but the client doesn't "
+            f"support interactive prompts. Set CONTACTS_TEST_MODE=true with "
+            f"CONTACTS_TEST_GROUP and supply group_identifier to bypass for "
+            f"test-harness use.",
+        )
+
+    if isinstance(result, AcceptedElicitation) and result.data == _CONFIRM_YES:
+        return None
+
+    if isinstance(result, (DeclinedElicitation, CancelledElicitation)):
+        action = "declined" if isinstance(result, DeclinedElicitation) else "cancelled"
+    else:
+        # Accepted but with "No, cancel" (or any other value)
+        action = "cancelled"
+
+    logger.info(
+        "%s %s by user (identifier=%s, preview=%s)",
+        operation,
+        action,
+        identifier,
+        description,
+    )
+    return {
+        "success": False,
+        "error": (
+            f"User {action} the {operation} of {entity_kind} "
+            f"{description!r} ({identifier})."
+        ),
+        "error_type": "user_declined",
     }
