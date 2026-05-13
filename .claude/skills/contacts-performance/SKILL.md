@@ -22,7 +22,7 @@ The performance characteristics of `Contacts.framework` differ fundamentally fro
 
 ## Per-tool baselines (#28 / v0.3.0, macOS 26.x, M-series, ~1700-contact iCloud DB)
 
-Captured 2026-05-12 via `make benchmark-baseline`. Authoritative source: [`tests/benchmarks/baseline.json`](../../tests/benchmarks/baseline.json). Re-run on macOS major releases; per-op tolerance in CI is 3× (a slowdown beyond that fails `make benchmark`).
+Captured 2026-05-12 via `make benchmark-baseline`. Authoritative source: [`tests/benchmarks/baseline.json`](../../../tests/benchmarks/baseline.json). Re-run on macOS major releases; per-op tolerance in CI is 3× (a slowdown beyond that fails `make benchmark`).
 
 | Operation | Median |
 |---|---:|
