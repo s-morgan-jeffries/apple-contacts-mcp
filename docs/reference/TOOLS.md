@@ -1016,7 +1016,7 @@ Common envelope:
 | `error_type` | Meaning | Optional context fields |
 |---|---|---|
 | `validation_error` | Caller violated the input contract — bad type, bad shape, empty required field, out-of-range birthday, email without `@`, etc. | — |
-| `authorization_denied` | TCC blocked the operation. The LLM should call `check_authorization` to disambiguate (`notDetermined` / `denied` / `restricted`) and surface `remediation` to the user. | `status`, `remediation` |
+| `authorization_denied` | TCC blocked the operation. Surfaced from **two** points: (1) the entry-check at the start of every data tool, and (2) the post-call check after CN returns a suspicious result or after any destructive op. The post-call variant means Contacts access was revoked mid-call — for destructive ops, the persistence of any change is undefined; callers should verify state via a read tool once they re-authorize. The LLM should call `check_authorization` to disambiguate (`notDetermined` / `denied` / `restricted`) and surface `remediation` to the user. See `tests/integration/test_authorization_revocation.md` for the manual test that exercises both variants. | `status`, `remediation` |
 | `safety_violation` | The destructive-op gate refused: in test mode, the asserted `group_identifier` didn't match `CONTACTS_TEST_GROUP`; outside test mode for `delete_contact` / `delete_group`, the client doesn't support FastMCP elicitation (no way to confirm). | — |
 | `user_declined` | The user explicitly declined or cancelled an elicitation confirmation prompt (`delete_contact`, `delete_group`). The destructive op was not performed. | — |
 | `not_found` | A referenced CN object (contact identifier or `group_identifier`) doesn't exist in the unified store. | — |

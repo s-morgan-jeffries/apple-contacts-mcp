@@ -15,6 +15,7 @@ from apple_contacts_mcp.exceptions import (
 )
 from apple_contacts_mcp.security import _get_test_group_identifiers
 from apple_contacts_mcp.server import (
+    _verify_authorization_still_granted,
     add_contact_to_group,
     check_authorization,
     create_contact,
@@ -153,8 +154,11 @@ class TestListContactsAuthFlow:
 
     def test_not_determined_then_granted_proceeds(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            # Three calls: entry check (notDetermined), post-request re-check,
+            # post-call verification (empty result triggers the #37 verifier).
             mock_connector._run_cn_authorization_status.side_effect = [
                 "notDetermined",
+                "authorized",
                 "authorized",
             ]
             mock_connector._run_cn_request_access.return_value = True
@@ -2762,3 +2766,138 @@ class TestDeleteGroupErrors:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "save boom" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #37: authorization revocation mid-process
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyAuthorizationStillGranted:
+    """Direct unit tests for _verify_authorization_still_granted()."""
+
+    def test_authorized_returns_none(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            assert _verify_authorization_still_granted() is None
+
+    def test_limited_returns_none(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "limited"
+            assert _verify_authorization_still_granted() is None
+
+    @pytest.mark.parametrize("status", ["denied", "restricted", "notDetermined"])
+    def test_revoked_returns_authorization_denied_dict(self, status: str) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = status
+            result = _verify_authorization_still_granted()
+        assert result is not None
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        assert result["status"] == status
+        assert "revoked during the call" in result["error"]
+        assert "remediation" in result
+
+    def test_status_call_raises_returns_unknown(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.side_effect = RuntimeError(
+                "store fell over"
+            )
+            result = _verify_authorization_still_granted()
+        assert result is not None
+        assert result["success"] is False
+        assert result["error_type"] == "unknown"
+        assert "store fell over" in result["error"]
+
+
+class TestPostCallRevocationOnReadTools:
+    """Empty result + revoked-since-entry → authorization_denied (not empty)."""
+
+    def test_list_contacts_empty_after_revocation_returns_denied(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            # Entry check sees authorized; post-call check sees denied.
+            mock_connector._run_cn_authorization_status.side_effect = [
+                "authorized",
+                "denied",
+            ]
+            mock_connector._run_cn_enumerate_contacts.return_value = []
+            result = list_contacts()
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+        assert result["status"] == "denied"
+
+    def test_list_contacts_non_empty_skips_post_call_check(self) -> None:
+        """Non-empty results don't pay the post-call check (perf)."""
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_enumerate_contacts.return_value = [
+                {"id": "X", "given_name": "Y", "family_name": "Z", "organization": ""}
+            ]
+            result = list_contacts()
+        assert result["success"] is True
+        # Only the entry check; no post-call check.
+        assert mock_connector._run_cn_authorization_status.call_count == 1
+
+    def test_get_contact_none_after_revocation_returns_denied(self) -> None:
+        """None contact + revoked → authorization_denied (not the misleading not_found)."""
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.side_effect = [
+                "authorized",
+                "denied",
+            ]
+            mock_connector._run_cn_unified_contact.return_value = None
+            result = get_contact("ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+
+    def test_get_contact_genuine_not_found_still_returns_not_found(self) -> None:
+        """None contact + still authorized → genuine not_found."""
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = None
+            result = get_contact("MISSING")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+
+
+class TestPostCallRevocationOnDestructiveTools:
+    """Save succeeded + revoked-since-entry → authorization_denied, telling
+    the caller the persistence is undefined."""
+
+    def test_create_contact_revoked_after_save_returns_denied(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.side_effect = [
+                "authorized",
+                "denied",
+            ]
+            mock_connector._run_cn_create_contact.return_value = "NEW-ID"
+            result = create_contact(given_name="Alice")
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
+
+    def test_create_contact_still_authorized_after_save_succeeds(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_contact.return_value = "NEW-ID"
+            result = create_contact(given_name="Alice")
+        assert result["success"] is True
+        assert result["identifier"] == "NEW-ID"
+
+    async def test_delete_contact_revoked_after_save_returns_denied(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        _get_test_group_identifiers.cache_clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.side_effect = [
+                "authorized",
+                "denied",
+            ]
+            mock_connector._run_cn_delete_contact.return_value = "ABCD"
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                result = await delete_contact(
+                    MagicMock(), identifier="ABCD", group_identifier="MCP-Test"
+                )
+        assert result["success"] is False
+        assert result["error_type"] == "authorization_denied"
