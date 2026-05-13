@@ -22,7 +22,7 @@ The performance characteristics of `Contacts.framework` differ fundamentally fro
 
 ## Per-tool baselines (#28 / v0.3.0, macOS 26.x, M-series, ~1700-contact iCloud DB)
 
-Captured 2026-05-12 via `make benchmark-baseline`. Authoritative source: [`tests/benchmarks/baseline.json`](../../tests/benchmarks/baseline.json). Re-run on macOS major releases; per-op tolerance in CI is 3× (a slowdown beyond that fails `make benchmark`).
+Captured 2026-05-12 via `make benchmark-baseline`. Authoritative source: [`tests/benchmarks/baseline.json`](../../../tests/benchmarks/baseline.json). Re-run on macOS major releases; per-op tolerance in CI is 3× (a slowdown beyond that fails `make benchmark`).
 
 | Operation | Median |
 |---|---:|
@@ -41,7 +41,8 @@ Captured 2026-05-12 via `make benchmark-baseline`. Authoritative source: [`tests
 | `read_photo` (no photo set) | 4 ms |
 | `read_note` (AppleScript path) | 651 ms |
 
-**Highlights:**
+### Highlights
+
 - **Predicate searches dominate by 5×** even after Phase 0: name search at 22 ms (substring match across thousands of contacts) is 5× the cost of a single `get_contact`; phone/email predicates at 4 ms are basically free because their key-domain is far smaller. **Always use predicates** — looping with `for c in all_contacts: if "x" in c.givenName()` over 1696 contacts costs O(N) framework round-trips.
 - **`list_contacts` (50 vs 200) is the same cost.** Pagination short-circuits via `stop_ptr[0] = True` but the per-callback serialization dominates over the early-exit savings until result-set is much smaller than enumeration.
 - **`list_groups` is surprisingly slow (50 ms)** for 8 groups — that's the N+1 container lookup per group. Worth optimizing only if user has 50+ groups; deferred.
@@ -127,6 +128,7 @@ The fallback path runs `osascript` as a subprocess — **expect 200–400 ms of 
 **Strategy:** for note-heavy tools, batch by enumerating contacts via `Contacts.framework` first (fast), then make N AppleScript calls only for the contacts the tool actually returns. Never iterate AppleScript over every contact.
 
 If you find yourself wanting to filter by note content (`whose note contains "..."`), don't — the predicate times out as documented above. Either:
+
 1. Feature-flag the search and bail with a clear error
 2. Mass-fetch notes via AppleScript into a side-cache and search the cache (only feasible for small contact counts, which contradicts why you'd want to filter in the first place)
 
@@ -153,6 +155,7 @@ Per `tests/conftest.py`, benchmark tests are opt-in via `--run-benchmark` so the
 ## When to revisit
 
 Re-profile when:
+
 - Apple ships a major macOS release (re-run baselines)
 - Contact counts in the test rig differ by 5×+ from the 1696-contact baseline
 - A tool ships that the original baselines didn't cover (per-op baseline added under issue #28)
