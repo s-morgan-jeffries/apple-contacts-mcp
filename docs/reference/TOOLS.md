@@ -440,7 +440,7 @@ Use `get_contact(identifier)` to read back the updated record.
 Delete an existing contact by identifier.
 
 ```python
-def delete_contact(
+async def delete_contact(
     identifier: str,
     group_identifier: str | None = None,
 ) -> dict[str, Any]
@@ -459,12 +459,16 @@ def delete_contact(
 {"success": true, "identifier": "ABCD-…"}
 ```
 
-**Error types:** `validation_error`, `safety_violation`, `authorization_denied`, `not_found`, `unknown`.
+**Error types:** `validation_error`, `safety_violation`, `user_declined`, `authorization_denied`, `not_found`, `unknown`.
 
 **Notes:**
-- **v0.1.0 only allows delete in test mode.** Outside `CONTACTS_TEST_MODE=true` this returns `error_type: "safety_violation"` — the full destructive UX (with confirmation prompts) ships in v0.4.0 (#24).
-- The `require_test_mode_for` gate fires **before** the auth check, so users outside test mode never see a TCC prompt for a call that's about to be refused.
-- In test mode, the existing test-group gate also enforces that `group_identifier` matches `CONTACTS_TEST_GROUP`.
+- **Outside test mode, the tool requires explicit user confirmation via FastMCP elicitation.** The client renders `Delete contact 'Alice Adams' (ABCD-…)? This cannot be undone.` with **Yes, delete** / **No, cancel** buttons. The contact's name is pre-fetched so the prompt isn't an opaque UUID.
+  - **Yes** → delete proceeds.
+  - **No / Declined / Cancelled** → `user_declined`.
+  - **Client doesn't support elicitation** → `safety_violation`, pointing at `CONTACTS_TEST_MODE` as the bypass.
+  - **Identifier doesn't match any contact** → `not_found` *before* prompting (no point asking the user about a non-existent record).
+- **In test mode** (`CONTACTS_TEST_MODE=true`), confirmation is skipped and the existing test-group safety gate applies: `group_identifier` must match `CONTACTS_TEST_GROUP`. This preserves the existing harness path.
+- Auth is checked before the test-mode branch, so users outside test mode in an unauthorized state still see the standard `authorization_denied` first.
 
 ---
 
@@ -969,7 +973,7 @@ def rename_group(
 Delete an existing contact group.
 
 ```python
-def delete_group(
+async def delete_group(
     identifier: str,
     group_identifier: str | None = None,
 ) -> dict[str, Any]
@@ -988,10 +992,10 @@ def delete_group(
 {"success": true, "identifier": "GRP-…:ABGroup"}
 ```
 
-**Error types:** `validation_error`, `authorization_denied`, `safety_violation`, `not_found`, `unknown`.
+**Error types:** `validation_error`, `safety_violation`, `user_declined`, `authorization_denied`, `not_found`, `unknown`.
 
 **Notes:**
-- **v0.3.0 only allows delete in test mode** — the full destructive UX (with confirmation prompts) ships in v0.4.0 (#36). Outside test mode this returns a `safety_violation`. Same posture as `delete_contact`.
+- **Outside test mode, requires explicit user confirmation via FastMCP elicitation** — same UX and error shape as `delete_contact`. The group's name is pre-fetched and shown in the prompt. `Yes` proceeds; `No` / `Declined` / `Cancelled` returns `user_declined`; client-without-elicit returns `safety_violation`.
 - **Member contacts are NOT deleted** — they remain in the address book; they just lose membership in the now-removed group.
 
 ---
@@ -1013,7 +1017,8 @@ Common envelope:
 |---|---|---|
 | `validation_error` | Caller violated the input contract — bad type, bad shape, empty required field, out-of-range birthday, email without `@`, etc. | — |
 | `authorization_denied` | TCC blocked the operation. The LLM should call `check_authorization` to disambiguate (`notDetermined` / `denied` / `restricted`) and surface `remediation` to the user. | `status`, `remediation` |
-| `safety_violation` | The destructive-op gate refused: either `CONTACTS_TEST_MODE=true` was set without a matching `group_identifier`, or `delete_contact` / `delete_group` was called outside test mode. | — |
+| `safety_violation` | The destructive-op gate refused: in test mode, the asserted `group_identifier` didn't match `CONTACTS_TEST_GROUP`; outside test mode for `delete_contact` / `delete_group`, the client doesn't support FastMCP elicitation (no way to confirm). | — |
+| `user_declined` | The user explicitly declined or cancelled an elicitation confirmation prompt (`delete_contact`, `delete_group`). The destructive op was not performed. | — |
 | `not_found` | A referenced CN object (contact identifier or `group_identifier`) doesn't exist in the unified store. | — |
 | `unknown` | Anything else — usually a CN save failure or an unexpected PyObjC error. The `error` field has the underlying message. | — |
 

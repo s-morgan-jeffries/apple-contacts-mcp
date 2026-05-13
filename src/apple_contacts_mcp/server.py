@@ -9,9 +9,15 @@ from typing import Any, cast
 
 from fastmcp import FastMCP
 
+from fastmcp.server.context import Context
+
 from .contacts_connector import ContactsConnector, SearchField
 from .exceptions import ContactsError, ContactsNotFoundError, ContactsTimeoutError
-from .security import check_test_mode_safety, require_test_mode_for
+from .security import (
+    _confirm_destructive,
+    _is_test_mode_enabled,
+    check_test_mode_safety,
+)
 from .utils import detect_image_format
 
 logging.basicConfig(
@@ -928,19 +934,25 @@ def update_contact(
 
 
 @mcp.tool()
-def delete_contact(
+async def delete_contact(
+    ctx: Context,
     identifier: str,
     group_identifier: str | None = None,
 ) -> dict[str, Any]:
     """Delete an existing contact by identifier.
 
-    **v0.1.0+ only allows delete in test mode** — the full destructive
-    UX (with confirmation prompts) ships in v0.4.0 (#36). Outside test
-    mode this returns a safety_violation error.
+    Outside test mode, this tool requires explicit user confirmation via
+    FastMCP elicitation: the client renders "Delete contact 'X' (id)?
+    This cannot be undone." with Yes/No buttons before the delete runs.
+    Declined or cancelled prompts return ``user_declined``.
 
-    In test mode (``CONTACTS_TEST_MODE=true``), ``group_identifier``
-    must match ``CONTACTS_TEST_GROUP`` to ensure the deleted contact
-    is one the test harness created.
+    If the client doesn't support elicitation, the tool refuses with
+    ``safety_violation`` pointing at ``CONTACTS_TEST_MODE`` as the bypass
+    for test-harness use.
+
+    In test mode (``CONTACTS_TEST_MODE=true``), confirmation is skipped
+    and the existing test-group safety gate applies: ``group_identifier``
+    must match ``CONTACTS_TEST_GROUP``.
 
     Args:
         identifier: The contact's CN identifier.
@@ -951,30 +963,41 @@ def delete_contact(
         On success: ``{"success": True, "identifier": identifier}``.
         On bad input: ``{"success": False, "error_type":
         "validation_error", ...}``.
-        On test mode off: ``{"success": False, "error_type":
-        "safety_violation", ...}``.
+        On test-mode safety gate refusal or elicit-unsupported client:
+        ``safety_violation``.
+        On user declining the confirmation: ``user_declined``.
         On TCC denial: same shape as ``list_contacts``.
-        On contact not found: ``{"success": False, "error_type":
-        "not_found", ...}``.
-        On CN save failure: ``{"success": False, "error_type":
-        "unknown", ...}``.
+        On contact not found: ``not_found``.
+        On CN save failure: ``unknown``.
     """
     if not identifier or not identifier.strip():
         return _validation_error("identifier must be a non-empty string")
-
-    require_err = require_test_mode_for("delete_contact")
-    if require_err is not None:
-        return require_err
 
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
 
-    safety_err = check_test_mode_safety(
-        "delete_contact", group=group_identifier
-    )
-    if safety_err is not None:
-        return safety_err
+    if _is_test_mode_enabled():
+        safety_err = check_test_mode_safety(
+            "delete_contact", group=group_identifier
+        )
+        if safety_err is not None:
+            return safety_err
+    else:
+        confirm_err = await _confirm_destructive(
+            ctx,
+            operation="delete_contact",
+            entity_kind="contact",
+            identifier=identifier,
+            preview_lookup=lambda: connector._run_cn_unified_contact(identifier),
+            describe=lambda c: (
+                f"{c.get('given_name', '')} {c.get('family_name', '')}".strip()
+                or c.get("organization")
+                or "(no name)"
+            ),
+        )
+        if confirm_err is not None:
+            return confirm_err
 
     try:
         connector._run_cn_delete_contact(identifier=identifier)
@@ -1678,19 +1701,24 @@ def rename_group(
 
 
 @mcp.tool()
-def delete_group(
+async def delete_group(
+    ctx: Context,
     identifier: str,
     group_identifier: str | None = None,
 ) -> dict[str, Any]:
     """Delete an existing contact group.
 
-    **v0.3.0 only allows delete in test mode** — the full destructive
-    UX (with confirmation prompts) ships in v0.4.0 (#36). Outside test
-    mode this returns a safety_violation error.
-
-    In test mode (``CONTACTS_TEST_MODE=true``), ``group_identifier``
-    must equal ``CONTACTS_TEST_GROUP``. Same posture as
+    Outside test mode, this tool requires explicit user confirmation
+    via FastMCP elicitation: "Delete group 'X' (id)? This cannot be
+    undone." with Yes/No buttons before the delete runs. Same UX as
     ``delete_contact``.
+
+    If the client doesn't support elicitation, the tool refuses with
+    ``safety_violation`` pointing at ``CONTACTS_TEST_MODE`` as the
+    bypass for test-harness use.
+
+    In test mode (``CONTACTS_TEST_MODE=true``), confirmation is skipped
+    and ``group_identifier`` must equal ``CONTACTS_TEST_GROUP``.
 
     Member contacts are NOT deleted by this operation — they keep
     existing in the address book; they just lose membership in the
@@ -1704,7 +1732,9 @@ def delete_group(
     Returns:
         On success: ``{"success": True, "identifier": identifier}``.
         On bad input: ``validation_error``.
-        On test mode off: ``safety_violation``.
+        On test-mode safety gate refusal or elicit-unsupported client:
+        ``safety_violation``.
+        On user declining the confirmation: ``user_declined``.
         On TCC denial: ``authorization_denied``.
         On unknown ``identifier``: ``not_found``.
         On CN save failure: ``unknown``.
@@ -1712,19 +1742,27 @@ def delete_group(
     if not identifier or not identifier.strip():
         return _validation_error("identifier must be a non-empty string")
 
-    require_err = require_test_mode_for("delete_group")
-    if require_err is not None:
-        return require_err
-
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
 
-    safety_err = check_test_mode_safety(
-        "delete_group", group=group_identifier
-    )
-    if safety_err is not None:
-        return safety_err
+    if _is_test_mode_enabled():
+        safety_err = check_test_mode_safety(
+            "delete_group", group=group_identifier
+        )
+        if safety_err is not None:
+            return safety_err
+    else:
+        confirm_err = await _confirm_destructive(
+            ctx,
+            operation="delete_group",
+            entity_kind="group",
+            identifier=identifier,
+            preview_lookup=lambda: connector._run_cn_fetch_group(identifier),
+            describe=lambda g: str(g.name()),
+        )
+        if confirm_err is not None:
+            return confirm_err
 
     try:
         connector._run_cn_delete_group(identifier=identifier)

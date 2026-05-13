@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1052,71 +1052,195 @@ class TestUpdateContactErrors:
 # ---------------------------------------------------------------------------
 
 
+def _make_ctx_accept(value: str = "Yes, delete") -> MagicMock:
+    """Build a fake Context whose elicit() returns AcceptedElicitation(value)."""
+    from fastmcp.server.elicitation import AcceptedElicitation
+
+    ctx = MagicMock(name="Context(accept)")
+    ctx.elicit = AsyncMock(return_value=AcceptedElicitation(data=value))
+    return ctx
+
+
+def _make_ctx_declined() -> MagicMock:
+    from fastmcp.server.elicitation import DeclinedElicitation
+
+    ctx = MagicMock(name="Context(declined)")
+    ctx.elicit = AsyncMock(return_value=DeclinedElicitation())
+    return ctx
+
+
+def _make_ctx_cancelled() -> MagicMock:
+    from fastmcp.server.elicitation import CancelledElicitation
+
+    ctx = MagicMock(name="Context(cancelled)")
+    ctx.elicit = AsyncMock(return_value=CancelledElicitation())
+    return ctx
+
+
+def _make_ctx_unsupported() -> MagicMock:
+    """Mock ctx whose elicit raises — simulates a client without elicit support."""
+    ctx = MagicMock(name="Context(unsupported)")
+    ctx.elicit = AsyncMock(
+        side_effect=RuntimeError("client does not support elicitation")
+    )
+    return ctx
+
+
+def _fake_contact_for_preview(
+    given: str = "Alice", family: str = "Adams"
+) -> dict[str, Any]:
+    """Minimal contact dict shaped like _run_cn_unified_contact's return."""
+    return {
+        "id": "ABCD",
+        "given_name": given,
+        "family_name": family,
+        "organization": "",
+    }
+
+
 class TestDeleteContactValidation:
-    def test_empty_identifier_returns_validation_error(self) -> None:
+    async def test_empty_identifier_returns_validation_error(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            result = delete_contact(identifier="")
+            result = await delete_contact(MagicMock(), identifier="")
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
         mock_connector._run_cn_authorization_status.assert_not_called()
 
 
-class TestDeleteContactRequiresTestMode:
-    def test_test_mode_off_returns_safety_violation(
+class TestDeleteContactTestModePath:
+    """In test mode, the existing group-scope safety gate applies and
+    no elicitation happens."""
+
+    async def test_no_group_arg_returns_safety_violation(
         self, monkeypatch: Any
     ) -> None:
-        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            result = delete_contact(identifier="ABCD")
-        assert result["success"] is False
-        assert result["error_type"] == "safety_violation"
-        assert "CONTACTS_TEST_MODE" in result["error"]
-        # Auth was NOT triggered (no TCC prompt for an op we refused).
-        mock_connector._run_cn_authorization_status.assert_not_called()
-        mock_connector._run_cn_delete_contact.assert_not_called()
-
-    def test_test_mode_explicit_false_returns_safety_violation(
-        self, monkeypatch: Any
-    ) -> None:
-        monkeypatch.setenv("CONTACTS_TEST_MODE", "false")
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            result = delete_contact(identifier="ABCD")
-        assert result["success"] is False
-        assert result["error_type"] == "safety_violation"
-        mock_connector._run_cn_authorization_status.assert_not_called()
-
-
-class TestDeleteContactTestGroupGate:
-    def test_test_mode_on_no_group_arg_blocked(self, monkeypatch: Any) -> None:
         monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
         monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
         _get_test_group_identifiers.cache_clear()
+        ctx = MagicMock()
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
             mock_connector._run_cn_authorization_status.return_value = "authorized"
             with patch("subprocess.run", side_effect=FileNotFoundError):
-                result = delete_contact(identifier="ABCD")
+                result = await delete_contact(ctx, identifier="ABCD")
         assert result["success"] is False
         assert result["error_type"] == "safety_violation"
         mock_connector._run_cn_delete_contact.assert_not_called()
+        ctx.elicit.assert_not_called()
 
-    def test_test_mode_on_with_matching_group_proceeds(
+    async def test_matching_group_proceeds_without_elicit(
         self, monkeypatch: Any
     ) -> None:
         monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
         monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
         _get_test_group_identifiers.cache_clear()
+        ctx = MagicMock()
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
             mock_connector._run_cn_authorization_status.return_value = "authorized"
             mock_connector._run_cn_delete_contact.return_value = "ABCD"
             with patch("subprocess.run", side_effect=FileNotFoundError):
-                result = delete_contact(
-                    identifier="ABCD", group_identifier="MCP-Test"
+                result = await delete_contact(
+                    ctx, identifier="ABCD", group_identifier="MCP-Test"
                 )
         assert result == {"success": True, "identifier": "ABCD"}
+        ctx.elicit.assert_not_called()
+
+
+class TestDeleteContactConfirmation:
+    """Outside test mode, the user must confirm via elicitation."""
+
+    async def test_accept_yes_proceeds_with_delete(self, monkeypatch: Any) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        ctx = _make_ctx_accept("Yes, delete")
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = (
+                _fake_contact_for_preview()
+            )
+            mock_connector._run_cn_delete_contact.return_value = "ABCD"
+            result = await delete_contact(ctx, identifier="ABCD")
+        assert result == {"success": True, "identifier": "ABCD"}
+        ctx.elicit.assert_awaited_once()
+        mock_connector._run_cn_delete_contact.assert_called_once_with(
+            identifier="ABCD"
+        )
+
+    async def test_accept_no_returns_user_declined(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        ctx = _make_ctx_accept("No, cancel")
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = (
+                _fake_contact_for_preview()
+            )
+            result = await delete_contact(ctx, identifier="ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "user_declined"
+        mock_connector._run_cn_delete_contact.assert_not_called()
+
+    async def test_declined_returns_user_declined(self, monkeypatch: Any) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        ctx = _make_ctx_declined()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = (
+                _fake_contact_for_preview()
+            )
+            result = await delete_contact(ctx, identifier="ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "user_declined"
+        mock_connector._run_cn_delete_contact.assert_not_called()
+
+    async def test_cancelled_returns_user_declined(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        ctx = _make_ctx_cancelled()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = (
+                _fake_contact_for_preview()
+            )
+            result = await delete_contact(ctx, identifier="ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "user_declined"
+        mock_connector._run_cn_delete_contact.assert_not_called()
+
+    async def test_elicit_unsupported_returns_safety_violation(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        ctx = _make_ctx_unsupported()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = (
+                _fake_contact_for_preview()
+            )
+            result = await delete_contact(ctx, identifier="ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        assert "CONTACTS_TEST_MODE" in result["error"]
+        mock_connector._run_cn_delete_contact.assert_not_called()
+
+    async def test_missing_contact_returns_not_found_without_prompting(
+        self, monkeypatch: Any
+    ) -> None:
+        """Pre-fetch returns None → not_found, elicit never called."""
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        ctx = _make_ctx_accept()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = None
+            result = await delete_contact(ctx, identifier="MISSING")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        ctx.elicit.assert_not_called()
+        mock_connector._run_cn_delete_contact.assert_not_called()
 
 
 class TestDeleteContactErrors:
-    def test_not_found_from_connector(self, monkeypatch: Any) -> None:
+    async def test_not_found_from_connector(self, monkeypatch: Any) -> None:
         monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
         monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
         _get_test_group_identifiers.cache_clear()
@@ -1126,13 +1250,13 @@ class TestDeleteContactErrors:
                 ContactsNotFoundError("Contact not found: 'BAD'")
             )
             with patch("subprocess.run", side_effect=FileNotFoundError):
-                result = delete_contact(
-                    identifier="BAD", group_identifier="MCP-Test"
+                result = await delete_contact(
+                    MagicMock(), identifier="BAD", group_identifier="MCP-Test"
                 )
         assert result["success"] is False
         assert result["error_type"] == "not_found"
 
-    def test_save_failure_returns_unknown(self, monkeypatch: Any) -> None:
+    async def test_save_failure_returns_unknown(self, monkeypatch: Any) -> None:
         monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
         monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
         _get_test_group_identifiers.cache_clear()
@@ -1142,8 +1266,8 @@ class TestDeleteContactErrors:
                 "delete boom"
             )
             with patch("subprocess.run", side_effect=FileNotFoundError):
-                result = delete_contact(
-                    identifier="ABCD", group_identifier="MCP-Test"
+                result = await delete_contact(
+                    MagicMock(), identifier="ABCD", group_identifier="MCP-Test"
                 )
         assert result["success"] is False
         assert result["error_type"] == "unknown"
@@ -2500,60 +2624,113 @@ class TestRenameGroupErrors:
 
 
 class TestDeleteGroupValidation:
-    def test_empty_identifier_returns_validation_error(self) -> None:
+    async def test_empty_identifier_returns_validation_error(self) -> None:
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            result = delete_group(identifier="")
+            result = await delete_group(MagicMock(), identifier="")
         assert result["success"] is False
         assert result["error_type"] == "validation_error"
         mock_connector._run_cn_authorization_status.assert_not_called()
 
 
-class TestDeleteGroupRequiresTestMode:
-    def test_test_mode_off_returns_safety_violation(
+class TestDeleteGroupTestModePath:
+    async def test_no_group_arg_returns_safety_violation(
         self, monkeypatch: Any
     ) -> None:
-        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            result = delete_group(identifier="GRP-1")
-        assert result["success"] is False
-        assert result["error_type"] == "safety_violation"
-        assert "CONTACTS_TEST_MODE" in result["error"]
-        # Auth was NOT triggered (no TCC prompt for an op we refused).
-        mock_connector._run_cn_authorization_status.assert_not_called()
-        mock_connector._run_cn_delete_group.assert_not_called()
-
-
-class TestDeleteGroupTestGroupGate:
-    def test_test_mode_on_no_group_arg_blocked(self, monkeypatch: Any) -> None:
         monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
         monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
         _get_test_group_identifiers.cache_clear()
+        ctx = MagicMock()
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
             mock_connector._run_cn_authorization_status.return_value = "authorized"
             with patch("subprocess.run", side_effect=FileNotFoundError):
-                result = delete_group(identifier="GRP-1")
+                result = await delete_group(ctx, identifier="GRP-1")
         assert result["success"] is False
         assert result["error_type"] == "safety_violation"
         mock_connector._run_cn_delete_group.assert_not_called()
+        ctx.elicit.assert_not_called()
 
-    def test_test_mode_on_with_matching_group_proceeds(
+    async def test_matching_group_proceeds_without_elicit(
         self, monkeypatch: Any
     ) -> None:
         monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
         monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
         _get_test_group_identifiers.cache_clear()
+        ctx = MagicMock()
         with patch("apple_contacts_mcp.server.connector") as mock_connector:
             mock_connector._run_cn_authorization_status.return_value = "authorized"
             mock_connector._run_cn_delete_group.return_value = "GRP-1"
             with patch("subprocess.run", side_effect=FileNotFoundError):
-                result = delete_group(
-                    identifier="GRP-1", group_identifier="MCP-Test"
+                result = await delete_group(
+                    ctx, identifier="GRP-1", group_identifier="MCP-Test"
                 )
         assert result == {"success": True, "identifier": "GRP-1"}
+        ctx.elicit.assert_not_called()
+
+
+class TestDeleteGroupConfirmation:
+    """Outside test mode, the user must confirm via elicitation."""
+
+    async def test_accept_yes_proceeds_with_delete(self, monkeypatch: Any) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        ctx = _make_ctx_accept("Yes, delete")
+        fake_group = MagicMock()
+        fake_group.name.return_value = "Family"
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_fetch_group.return_value = fake_group
+            mock_connector._run_cn_delete_group.return_value = "GRP-1"
+            result = await delete_group(ctx, identifier="GRP-1")
+        assert result == {"success": True, "identifier": "GRP-1"}
+        ctx.elicit.assert_awaited_once()
+        mock_connector._run_cn_delete_group.assert_called_once_with(
+            identifier="GRP-1"
+        )
+
+    async def test_declined_returns_user_declined(self, monkeypatch: Any) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        ctx = _make_ctx_declined()
+        fake_group = MagicMock()
+        fake_group.name.return_value = "Family"
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_fetch_group.return_value = fake_group
+            result = await delete_group(ctx, identifier="GRP-1")
+        assert result["success"] is False
+        assert result["error_type"] == "user_declined"
+        mock_connector._run_cn_delete_group.assert_not_called()
+
+    async def test_elicit_unsupported_returns_safety_violation(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        ctx = _make_ctx_unsupported()
+        fake_group = MagicMock()
+        fake_group.name.return_value = "Family"
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_fetch_group.return_value = fake_group
+            result = await delete_group(ctx, identifier="GRP-1")
+        assert result["success"] is False
+        assert result["error_type"] == "safety_violation"
+        assert "CONTACTS_TEST_MODE" in result["error"]
+        mock_connector._run_cn_delete_group.assert_not_called()
+
+    async def test_missing_group_returns_not_found_without_prompting(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        ctx = _make_ctx_accept()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_fetch_group.return_value = None
+            result = await delete_group(ctx, identifier="MISSING")
+        assert result["success"] is False
+        assert result["error_type"] == "not_found"
+        ctx.elicit.assert_not_called()
 
 
 class TestDeleteGroupErrors:
-    def test_not_found_from_connector(self, monkeypatch: Any) -> None:
+    async def test_not_found_from_connector(self, monkeypatch: Any) -> None:
         monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
         monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
         _get_test_group_identifiers.cache_clear()
@@ -2563,13 +2740,13 @@ class TestDeleteGroupErrors:
                 ContactsNotFoundError("Group not found: 'BAD'")
             )
             with patch("subprocess.run", side_effect=FileNotFoundError):
-                result = delete_group(
-                    identifier="BAD", group_identifier="MCP-Test"
+                result = await delete_group(
+                    MagicMock(), identifier="BAD", group_identifier="MCP-Test"
                 )
         assert result["success"] is False
         assert result["error_type"] == "not_found"
 
-    def test_save_failure_returns_unknown(self, monkeypatch: Any) -> None:
+    async def test_save_failure_returns_unknown(self, monkeypatch: Any) -> None:
         monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
         monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
         _get_test_group_identifiers.cache_clear()
@@ -2579,8 +2756,8 @@ class TestDeleteGroupErrors:
                 "save boom"
             )
             with patch("subprocess.run", side_effect=FileNotFoundError):
-                result = delete_group(
-                    identifier="GRP-1", group_identifier="MCP-Test"
+                result = await delete_group(
+                    MagicMock(), identifier="GRP-1", group_identifier="MCP-Test"
                 )
         assert result["success"] is False
         assert result["error_type"] == "unknown"
