@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Sliding-window rate limiter in `security.py` (`RateLimiter`, `TIER_LIMITS`, `OPERATION_TIERS`, `check_rate_limit`, `rate_limiter` singleton). Three tiers: `cheap_reads` (60/60s), `expensive_ops` (20/60s), `destructives` (5/60s). All 21 tools have tier mappings. **Built but not wired into any tool yet** — wiring is tracked under #46. Documented in TOOLS.md's error-types appendix so callers can prepare. Pattern mirrors apple-mail-mcp's security module (#35).
+
 ### Changed
 
 - Dev dependency `mypy` bumped from 1.20.2 → 2.1.0. Mypy stays informational in CI (`continue-on-error: true`). Two type-annotation fixes in `security.py` were required to satisfy mypy 2.x's stricter overload resolution and parameter typing: `_confirm_destructive` now types its `preview_lookup` / `describe` callables as `Any` (the callers pass framework-specific types like `CNGroup`, not just `dict`), and the `ctx.elicit(response_type=[...])` call has a targeted `# type: ignore[arg-type]` because mypy 2.x picks the wrong FastMCP overload for list literals — runtime dispatch is correct.

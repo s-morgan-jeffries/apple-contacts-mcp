@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
@@ -299,4 +301,125 @@ async def _confirm_destructive(
             f"{description!r} ({identifier})."
         ),
         "error_type": "user_declined",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting (#35)
+#
+# Sliding-window per-tier rate limiter. Built but not wired into tools yet;
+# wiring is tracked under #46. The pattern mirrors apple-mail-mcp's security
+# module.
+# ---------------------------------------------------------------------------
+
+# Tier limits: (max_calls, window_seconds). The window is seconds-since-now;
+# calls older than now-window are evicted from the deque on every check, so
+# the limit applies to the trailing window rather than fixed buckets.
+TIER_LIMITS: dict[str, tuple[int, float]] = {
+    "cheap_reads": (60, 60.0),
+    "expensive_ops": (20, 60.0),
+    "destructives": (5, 60.0),
+}
+
+# Per-tool tier assignment. Every @mcp.tool() name in server.py should
+# appear here once #46 wires check_rate_limit into the tool entries.
+# Adding a new tool without a tier mapping triggers a logger warning at
+# check time but passes through (fail open) so a missed mapping doesn't
+# brick a release.
+OPERATION_TIERS: dict[str, str] = {
+    "check_authorization": "cheap_reads",
+    "list_contacts": "cheap_reads",
+    "get_contact": "cheap_reads",
+    "list_groups": "cheap_reads",
+    "get_contacts_in_group": "cheap_reads",
+    "list_containers": "cheap_reads",
+    "read_note": "cheap_reads",
+    "read_photo": "cheap_reads",
+    "export_vcard": "cheap_reads",
+    "search_contacts": "expensive_ops",
+    "create_contact": "expensive_ops",
+    "update_contact": "expensive_ops",
+    "import_vcard": "expensive_ops",
+    "write_note": "expensive_ops",
+    "write_photo": "expensive_ops",
+    "add_contact_to_group": "expensive_ops",
+    "remove_contact_from_group": "expensive_ops",
+    "create_group": "expensive_ops",
+    "rename_group": "expensive_ops",
+    "delete_contact": "destructives",
+    "delete_group": "destructives",
+}
+
+
+class RateLimiter:
+    """Sliding-window rate limiter with per-tier tracking.
+
+    Thread-unsafe by design — FastMCP serializes tool calls per session,
+    so we don't pay for locking. If we ever multiplex concurrent tool
+    handlers (e.g., parallel HTTP requests) the deque mutations would
+    need protection; defer until that materializes.
+    """
+
+    def __init__(self) -> None:
+        self._windows: dict[str, deque[float]] = {
+            tier: deque() for tier in TIER_LIMITS
+        }
+
+    def check(self, tier: str) -> bool:
+        """Return True if the call is allowed under the tier's limit.
+        On True, the timestamp is recorded; on False, no state changes."""
+        now = time.monotonic()
+        max_calls, window = TIER_LIMITS[tier]
+        q = self._windows[tier]
+        # Evict timestamps that have aged out of the window.
+        while q and q[0] <= now - window:
+            q.popleft()
+        if len(q) >= max_calls:
+            return False
+        q.append(now)
+        return True
+
+    def reset(self) -> None:
+        """Clear every tier's window. For test isolation between cases."""
+        for q in self._windows.values():
+            q.clear()
+
+
+# Module singleton. Tests call rate_limiter.reset() between cases.
+rate_limiter = RateLimiter()
+
+
+def check_rate_limit(
+    operation: str, params: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """Returns None if the call is allowed; a rate_limited error dict if not.
+
+    ``params`` is accepted for parity with apple-mail's signature; eventually
+    fed to the audit logger (#47) on deny. Currently unused.
+
+    Unknown operations pass through with a logger warning — the rate limiter
+    fails open if a tool ships without a tier mapping, so a missed
+    OPERATION_TIERS entry won't brick the server. Release-gate parity
+    checks should catch the missing mapping at PR time once #46 wires
+    this in.
+    """
+    _ = params  # accepted for forward-compat with #47
+    tier = OPERATION_TIERS.get(operation)
+    if tier is None:
+        logger.warning(
+            "rate-limit check on unmapped operation %r; allowing through "
+            "(add an entry to OPERATION_TIERS in security.py)",
+            operation,
+        )
+        return None
+    if rate_limiter.check(tier):
+        return None
+    max_calls, window = TIER_LIMITS[tier]
+    return {
+        "success": False,
+        "error": (
+            f"Rate limit exceeded for {operation}: {max_calls} calls per "
+            f"{int(window)}s for {tier!r} operations."
+        ),
+        "error_type": "rate_limited",
     }
