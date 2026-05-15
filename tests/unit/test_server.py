@@ -13,7 +13,7 @@ from apple_contacts_mcp.exceptions import (
     ContactsNotFoundError,
     ContactsTimeoutError,
 )
-from apple_contacts_mcp.security import _get_test_group_identifiers
+from apple_contacts_mcp.security import _get_test_group_identifiers, rate_limiter
 from apple_contacts_mcp.server import (
     _verify_authorization_still_granted,
     add_contact_to_group,
@@ -38,6 +38,14 @@ from apple_contacts_mcp.server import (
     write_note,
     write_photo,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter() -> None:
+    """Tools wire `check_rate_limit` (issue #46); the module-level
+    `rate_limiter` accumulates across tests. Reset between cases so
+    one tier's budget doesn't leak into the next test."""
+    rate_limiter.reset()
 
 
 class TestCheckAuthorization:
@@ -2901,3 +2909,103 @@ class TestPostCallRevocationOnDestructiveTools:
                 )
         assert result["success"] is False
         assert result["error_type"] == "authorization_denied"
+
+
+# ---------------------------------------------------------------------------
+# Issue #46: rate-limit wiring drift guard
+# ---------------------------------------------------------------------------
+
+
+class TestRateLimitWiringPerTool:
+    """Every @mcp.tool() must call check_rate_limit with its own name.
+
+    Two checks:
+
+    1. Source-level: scan server.py for every `def <tool>(`-after-`@mcp.tool()`
+       and verify the function body contains `check_rate_limit("<tool>")`.
+       Catches the drift case where someone adds a new tool but forgets the
+       gate.
+
+    2. Runtime: pick one tool from each tier and verify that a mocked
+       rate-limit deny short-circuits before the connector is touched.
+       Catches the case where the gate is *present* but placed too late.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self) -> None:
+        rate_limiter.reset()
+        yield
+        rate_limiter.reset()
+
+    def test_every_tool_calls_check_rate_limit_with_own_name(self) -> None:
+        import re
+        from pathlib import Path
+
+        server_src = (
+            Path(__file__).resolve().parents[2]
+            / "src"
+            / "apple_contacts_mcp"
+            / "server.py"
+        ).read_text()
+        # Capture each tool's name and its full body (until the next @mcp.tool
+        # or end of file). For each, assert check_rate_limit("<name>") appears.
+        tool_decl = re.compile(
+            r"@mcp\.tool\(\)\s+(?:async\s+)?def\s+(\w+)\s*\([^)]*\)",
+            re.MULTILINE,
+        )
+        matches = list(tool_decl.finditer(server_src))
+        # For each match, the body runs from match.end() to the next match (or EOF)
+        missing: list[str] = []
+        for i, m in enumerate(matches):
+            tool_name = m.group(1)
+            body_start = m.end()
+            body_end = matches[i + 1].start() if i + 1 < len(matches) else len(
+                server_src
+            )
+            body = server_src[body_start:body_end]
+            if f'check_rate_limit("{tool_name}")' not in body:
+                missing.append(tool_name)
+        assert not missing, (
+            f"tools missing check_rate_limit gate or with mismatched op name: "
+            f"{missing}"
+        )
+
+    def test_list_contacts_short_circuits_when_rate_limited(self) -> None:
+        # Fill the cheap_reads tier so the next call denies.
+        from apple_contacts_mcp.security import TIER_LIMITS
+
+        max_calls, _ = TIER_LIMITS["cheap_reads"]
+        for _ in range(max_calls):
+            assert rate_limiter.check("cheap_reads") is True
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = list_contacts()
+        assert result["success"] is False
+        assert result["error_type"] == "rate_limited"
+        mock_connector._run_cn_authorization_status.assert_not_called()
+        mock_connector._run_cn_enumerate_contacts.assert_not_called()
+
+    async def test_delete_contact_short_circuits_when_rate_limited(self) -> None:
+        from apple_contacts_mcp.security import TIER_LIMITS
+
+        max_calls, _ = TIER_LIMITS["destructives"]
+        for _ in range(max_calls):
+            assert rate_limiter.check("destructives") is True
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = await delete_contact(MagicMock(), identifier="ABCD")
+        assert result["success"] is False
+        assert result["error_type"] == "rate_limited"
+        mock_connector._run_cn_authorization_status.assert_not_called()
+        mock_connector._run_cn_delete_contact.assert_not_called()
+
+    def test_create_contact_short_circuits_when_rate_limited(self) -> None:
+        from apple_contacts_mcp.security import TIER_LIMITS
+
+        max_calls, _ = TIER_LIMITS["expensive_ops"]
+        for _ in range(max_calls):
+            assert rate_limiter.check("expensive_ops") is True
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = create_contact(given_name="Alice")
+        assert result["success"] is False
+        assert result["error_type"] == "rate_limited"
+        mock_connector._run_cn_authorization_status.assert_not_called()
+        mock_connector._run_cn_create_contact.assert_not_called()
