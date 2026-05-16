@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- All 21 `@mcp.tool()` entries now call `check_rate_limit(<operation>)` after input validation and before the auth gate. The rate-limit primitive shipped in #35 is now actually enforced. Tools that exceed their tier's sliding window return `error_type: rate_limited` without triggering a TCC prompt or touching the connector. New drift-guard test `test_every_tool_calls_check_rate_limit_with_own_name` walks the server.py source and fails CI if a new tool ships without the gate (#46).
+
 ### Added
 
 - Sliding-window rate limiter in `security.py` (`RateLimiter`, `TIER_LIMITS`, `OPERATION_TIERS`, `check_rate_limit`, `rate_limiter` singleton). Three tiers: `cheap_reads` (60/60s), `expensive_ops` (20/60s), `destructives` (5/60s). All 21 tools have tier mappings. **Built but not wired into any tool yet** — wiring is tracked under #46. Documented in TOOLS.md's error-types appendix so callers can prepare. Pattern mirrors apple-mail-mcp's security module (#35).

@@ -15,6 +15,7 @@ from .exceptions import ContactsError, ContactsNotFoundError, ContactsTimeoutErr
 from .security import (
     _confirm_destructive,
     _is_test_mode_enabled,
+    check_rate_limit,
     check_test_mode_safety,
 )
 from .utils import detect_image_format
@@ -74,6 +75,10 @@ def check_authorization() -> dict[str, Any]:
         When status is not authorized/limited, the response also
         includes a remediation field with copy you can show the user.
     """
+    rate_err = check_rate_limit("check_authorization")
+    if rate_err is not None:
+        return rate_err
+
     try:
         status = connector._run_cn_authorization_status()
     except Exception as exc:
@@ -217,6 +222,10 @@ def list_contacts(offset: int = 0, limit: int = 50) -> dict[str, Any]:
 
     effective_limit = min(limit, _LIST_CONTACTS_MAX)
 
+    rate_err = check_rate_limit("list_contacts")
+    if rate_err is not None:
+        return rate_err
+
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
@@ -294,6 +303,10 @@ def get_contact(
             "error": "identifier must be a non-empty string",
             "error_type": "validation_error",
         }
+
+    rate_err = check_rate_limit("get_contact")
+    if rate_err is not None:
+        return rate_err
 
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
@@ -392,6 +405,10 @@ def search_contacts(
         )
     [(field, value)] = provided.items()
 
+    rate_err = check_rate_limit("search_contacts")
+    if rate_err is not None:
+        return rate_err
+
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
@@ -448,6 +465,10 @@ def list_containers() -> dict[str, Any]:
         On unexpected failure: ``{"success": False, "error_type":
         "unknown", "error": ...}``.
     """
+    rate_err = check_rate_limit("list_containers")
+    if rate_err is not None:
+        return rate_err
+
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
@@ -492,6 +513,10 @@ def list_groups() -> dict[str, Any]:
         On unexpected failure: ``{"success": False, "error_type":
         "unknown", "error": ...}``.
     """
+    rate_err = check_rate_limit("list_groups")
+    if rate_err is not None:
+        return rate_err
+
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
@@ -544,6 +569,10 @@ def get_contacts_in_group(identifier: str) -> dict[str, Any]:
     """
     if not identifier or not identifier.strip():
         return _validation_error("identifier must be a non-empty string")
+
+    rate_err = check_rate_limit("get_contacts_in_group")
+    if rate_err is not None:
+        return rate_err
 
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
@@ -845,6 +874,10 @@ def create_contact(
     if validation_err is not None:
         return validation_err
 
+    rate_err = check_rate_limit("create_contact")
+    if rate_err is not None:
+        return rate_err
+
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
@@ -987,6 +1020,10 @@ def update_contact(
     if validation_err is not None:
         return validation_err
 
+    rate_err = check_rate_limit("update_contact")
+    if rate_err is not None:
+        return rate_err
+
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
@@ -1059,6 +1096,10 @@ async def delete_contact(
     """
     if not identifier or not identifier.strip():
         return _validation_error("identifier must be a non-empty string")
+
+    rate_err = check_rate_limit("delete_contact")
+    if rate_err is not None:
+        return rate_err
 
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
@@ -1146,6 +1187,10 @@ def export_vcard(identifiers: list[str]) -> dict[str, Any]:
                 f"identifiers[{i}] must be a non-empty string"
             )
 
+    rate_err = check_rate_limit("export_vcard")
+    if rate_err is not None:
+        return rate_err
+
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
@@ -1209,6 +1254,10 @@ def import_vcard(
         return _validation_error(
             "vcard_text must be a non-empty string"
         )
+
+    rate_err = check_rate_limit("import_vcard")
+    if rate_err is not None:
+        return rate_err
 
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
@@ -1298,6 +1347,10 @@ def read_note(identifier: str) -> dict[str, Any]:
     if not identifier or not identifier.strip():
         return _validation_error("identifier must be a non-empty string")
 
+    rate_err = check_rate_limit("read_note")
+    if rate_err is not None:
+        return rate_err
+
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
@@ -1351,6 +1404,10 @@ def write_note(
     """
     if not identifier or not identifier.strip():
         return _validation_error("identifier must be a non-empty string")
+
+    rate_err = check_rate_limit("write_note")
+    if rate_err is not None:
+        return rate_err
 
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
@@ -1410,6 +1467,10 @@ def read_photo(identifier: str) -> dict[str, Any]:
     """
     if not identifier or not identifier.strip():
         return _validation_error("identifier must be a non-empty string")
+
+    rate_err = check_rate_limit("read_photo")
+    if rate_err is not None:
+        return rate_err
 
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
@@ -1500,6 +1561,10 @@ def write_photo(
                 f"image_data is not valid base64: {exc}"
             )
 
+    rate_err = check_rate_limit("write_photo")
+    if rate_err is not None:
+        return rate_err
+
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
@@ -1574,6 +1639,10 @@ def add_contact_to_group(
             "group_identifier must be a non-empty string"
         )
 
+    rate_err = check_rate_limit("add_contact_to_group")
+    if rate_err is not None:
+        return rate_err
+
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
@@ -1646,6 +1715,10 @@ def remove_contact_from_group(
         return _validation_error(
             "group_identifier must be a non-empty string"
         )
+
+    rate_err = check_rate_limit("remove_contact_from_group")
+    if rate_err is not None:
+        return rate_err
 
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
@@ -1722,6 +1795,10 @@ def create_group(
     if not name or not name.strip():
         return _validation_error("name must be a non-empty string")
 
+    rate_err = check_rate_limit("create_group")
+    if rate_err is not None:
+        return rate_err
+
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
         return auth_err
@@ -1783,6 +1860,10 @@ def rename_group(
         return _validation_error("identifier must be a non-empty string")
     if not new_name or not new_name.strip():
         return _validation_error("new_name must be a non-empty string")
+
+    rate_err = check_rate_limit("rename_group")
+    if rate_err is not None:
+        return rate_err
 
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
@@ -1860,6 +1941,10 @@ async def delete_group(
     """
     if not identifier or not identifier.strip():
         return _validation_error("identifier must be a non-empty string")
+
+    rate_err = check_rate_limit("delete_group")
+    if rate_err is not None:
+        return rate_err
 
     auth_err = _require_contacts_authorization()
     if auth_err is not None:
