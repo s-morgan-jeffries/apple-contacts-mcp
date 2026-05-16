@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `OperationLogger` audit log in `security.py` — append-only in-memory record of every `@mcp.tool()` invocation with `{timestamp, operation, parameters, result}` shape. Four `result` values: `"success"` (logged by the tool body before the success return), `"rate_limited"` (by `check_rate_limit` on deny), `"safety_violation"` (by `_safety_error`, covering both `check_test_mode_safety` and `require_test_mode_for`, plus the elicit-unsupported branch of `_confirm_destructive`), and `"cancelled"` (by `_confirm_destructive` when the user declines, cancels, or explicitly answers "No"). Module singleton `operation_logger`; `get_recent_operations(limit=10)` returns the last N entries (#47).
+
 ### Changed
 
+- All 21 `@mcp.tool()` entries now call `operation_logger.log_operation(<name>, <curated-params>, "success")` immediately before each success return. Logged parameters are curated to exclude PII and content: identifiers, container/group IDs, counts (phone/email/url/postal/date/social/relation/im), lengths (note bytes, vcard bytes, image bytes, name lengths), booleans (`has_birthday`, `has_photo`, `clearing`), and sorted field-name lists for partial updates. Actual name/email/phone/URL/note/image content is NEVER persisted to the audit log. `read_photo` logs at two distinct sites (one per success branch — has-photo vs. no-photo). The three security primitives (`check_rate_limit`, `_safety_error`, `_confirm_destructive`) emit denied/cancelled entries themselves — tool bodies stay single-purpose. New drift-guard test `test_every_tool_calls_log_operation_with_own_name` mirrors #46's rate-limit guard and fails CI if a new tool ships without an audit-log call (#47).
+- `check_rate_limit` now consumes its `params` argument on deny: the call is appended to `operation_logger` with `result="rate_limited"`. The forward-compat docstring from #35 is removed. Tool-body callers pass no params today; the empty dict shapes the audit entry consistently (#47).
+- `_safety_error` gained an optional `params` kwarg defaulting to `{"violation": <message>}` so safety-gate denies land an audit entry with a clear payload even when the caller doesn't thread its own params (#47).
 - All 21 `@mcp.tool()` entries now call `check_rate_limit(<operation>)` after input validation and before the auth gate. The rate-limit primitive shipped in #35 is now actually enforced. Tools that exceed their tier's sliding window return `error_type: rate_limited` without triggering a TCC prompt or touching the connector. New drift-guard test `test_every_tool_calls_check_rate_limit_with_own_name` walks the server.py source and fails CI if a new tool ships without the gate (#46).
 
 ### Added

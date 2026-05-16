@@ -13,7 +13,11 @@ from apple_contacts_mcp.exceptions import (
     ContactsNotFoundError,
     ContactsTimeoutError,
 )
-from apple_contacts_mcp.security import _get_test_group_identifiers, rate_limiter
+from apple_contacts_mcp.security import (
+    _get_test_group_identifiers,
+    operation_logger,
+    rate_limiter,
+)
 from apple_contacts_mcp.server import (
     _verify_authorization_still_granted,
     add_contact_to_group,
@@ -41,11 +45,12 @@ from apple_contacts_mcp.server import (
 
 
 @pytest.fixture(autouse=True)
-def _reset_rate_limiter() -> None:
-    """Tools wire `check_rate_limit` (issue #46); the module-level
-    `rate_limiter` accumulates across tests. Reset between cases so
-    one tier's budget doesn't leak into the next test."""
+def _reset_security_singletons() -> None:
+    """Tools wire both `check_rate_limit` (#46) and `operation_logger` (#47);
+    both are module singletons that accumulate across tests. Reset between
+    cases so neither budget nor audit-log entries leak forward."""
     rate_limiter.reset()
+    operation_logger.operations.clear()
 
 
 class TestCheckAuthorization:
@@ -3009,3 +3014,121 @@ class TestRateLimitWiringPerTool:
         assert result["error_type"] == "rate_limited"
         mock_connector._run_cn_authorization_status.assert_not_called()
         mock_connector._run_cn_create_contact.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Issue #47: operation_logger wiring drift guard
+# ---------------------------------------------------------------------------
+
+
+class TestOperationLoggerWiringPerTool:
+    """Every @mcp.tool() must call operation_logger.log_operation with its
+    own name on the success path. Mirrors #46's rate-limit drift guard.
+
+    Two checks:
+    1. Source-level: scan server.py and assert each tool body contains
+       `operation_logger.log_operation("<tool>"`.
+    2. Runtime: pick one tool per category (read / write / async-delete)
+       and verify the success path appends a single "success" entry.
+    """
+
+    def test_every_tool_calls_log_operation_with_own_name(self) -> None:
+        import re
+        from pathlib import Path
+
+        server_src = (
+            Path(__file__).resolve().parents[2]
+            / "src"
+            / "apple_contacts_mcp"
+            / "server.py"
+        ).read_text()
+        tool_decl = re.compile(
+            r"@mcp\.tool\(\)\s+(?:async\s+)?def\s+(\w+)\s*\([^)]*\)",
+            re.MULTILINE,
+        )
+        matches = list(tool_decl.finditer(server_src))
+        missing: list[str] = []
+        for i, m in enumerate(matches):
+            tool_name = m.group(1)
+            body_start = m.end()
+            body_end = matches[i + 1].start() if i + 1 < len(matches) else len(
+                server_src
+            )
+            body = server_src[body_start:body_end]
+            log_call = re.compile(
+                rf'operation_logger\.log_operation\(\s*"{re.escape(tool_name)}"',
+                re.DOTALL,
+            )
+            if not log_call.search(body):
+                missing.append(tool_name)
+        assert not missing, (
+            f"tools missing operation_logger.log_operation call (or with "
+            f"mismatched op name): {missing}"
+        )
+
+    def test_list_contacts_success_logs_one_success_entry(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_enumerate_contacts.return_value = [
+                {"id": "abc", "given_name": "A"}
+            ]
+            result = list_contacts()
+        assert result["success"] is True
+        assert len(operation_logger.operations) == 1
+        entry = operation_logger.operations[0]
+        assert entry["operation"] == "list_contacts"
+        assert entry["result"] == "success"
+        assert entry["parameters"]["count"] == 1
+
+    def test_create_contact_success_logs_one_success_entry(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_create_contact.return_value = "new-id"
+            result = create_contact(given_name="Alice")
+        assert result["success"] is True
+        assert len(operation_logger.operations) == 1
+        entry = operation_logger.operations[0]
+        assert entry["operation"] == "create_contact"
+        assert entry["result"] == "success"
+        # PII curation: name fields not logged.
+        assert "given_name" not in entry["parameters"]
+        assert "family_name" not in entry["parameters"]
+        assert entry["parameters"]["phone_count"] == 0
+        assert entry["parameters"]["email_count"] == 0
+
+    async def test_delete_contact_success_logs_one_success_entry(
+        self,
+    ) -> None:
+        from fastmcp.server.elicitation import AcceptedElicitation
+
+        ctx = MagicMock()
+        ctx.elicit = AsyncMock(return_value=AcceptedElicitation(data="Yes, delete"))
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = {
+                "id": "abc",
+                "given_name": "A",
+            }
+            mock_connector._run_cn_delete_contact.return_value = None
+            result = await delete_contact(ctx, identifier="abc")
+        assert result["success"] is True
+        assert len(operation_logger.operations) == 1
+        entry = operation_logger.operations[0]
+        assert entry["operation"] == "delete_contact"
+        assert entry["result"] == "success"
+        assert entry["parameters"]["identifier"] == "abc"
+
+    def test_rate_limited_call_logs_rate_limited_not_success(self) -> None:
+        """Belt-and-suspenders: rate-limit gate fires before the tool body,
+        so the success-path log_operation never runs."""
+        from apple_contacts_mcp.security import TIER_LIMITS
+
+        max_calls, _ = TIER_LIMITS["cheap_reads"]
+        for _ in range(max_calls):
+            assert rate_limiter.check("cheap_reads") is True
+        with patch("apple_contacts_mcp.server.connector"):
+            result = list_contacts()
+        assert result["error_type"] == "rate_limited"
+        # Exactly one entry — the rate-limit deny. No success entry.
+        results = [e["result"] for e in operation_logger.operations]
+        assert results == ["rate_limited"]

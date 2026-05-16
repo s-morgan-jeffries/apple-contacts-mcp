@@ -17,10 +17,12 @@ from apple_contacts_mcp.security import (
     DESTRUCTIVE_OPERATIONS,
     OPERATION_TIERS,
     TIER_LIMITS,
+    OperationLogger,
     RateLimiter,
     _get_test_group_identifiers,
     check_rate_limit,
     check_test_mode_safety,
+    operation_logger,
     rate_limiter,
     require_test_mode_for,
 )
@@ -356,9 +358,27 @@ class TestCheckRateLimit:
         assert "delete_contact" in result["error"]
         assert "destructives" in result["error"]
 
-    def test_params_is_accepted_but_unused(self, _fresh_rate_limiter: Any) -> None:
-        """The params kwarg matches apple-mail's signature for #47 forward-compat."""
-        assert check_rate_limit("list_contacts", params={"offset": 0}) is None
+    def test_params_logged_on_rate_limit_deny(
+        self, _fresh_rate_limiter: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On deny, the params dict is appended to the audit log."""
+        operation_logger.operations.clear()
+        fake_now = [0.0]
+        monkeypatch.setattr(
+            "apple_contacts_mcp.security.time.monotonic", lambda: fake_now[0]
+        )
+        for _ in range(TIER_LIMITS["destructives"][0]):
+            assert check_rate_limit("delete_contact", params={"k": "v"}) is None
+        # Allowed calls should not log.
+        assert operation_logger.operations == []
+        # Deny logs.
+        denied = check_rate_limit("delete_contact", params={"k": "v"})
+        assert denied is not None
+        assert len(operation_logger.operations) == 1
+        entry = operation_logger.operations[0]
+        assert entry["operation"] == "delete_contact"
+        assert entry["parameters"] == {"k": "v"}
+        assert entry["result"] == "rate_limited"
 
 
 class TestOperationTiersCoverage:
@@ -407,3 +427,277 @@ class TestOperationTiersCoverage:
             f"DESTRUCTIVE_OPERATIONS contains ops without a rate-limit "
             f"tier mapping: {sorted(unmapped)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #47: OperationLogger
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=False)
+def _fresh_operation_logger() -> Any:
+    """Clear the audit log between cases. Singleton state would otherwise
+    bleed across tests."""
+    operation_logger.operations.clear()
+    yield
+    operation_logger.operations.clear()
+
+
+class TestOperationLogger:
+    """Direct tests against the OperationLogger class."""
+
+    def test_log_operation_appends_entry(
+        self, _fresh_operation_logger: Any
+    ) -> None:
+        logger = OperationLogger()
+        logger.log_operation("test_op", {"k": "v"}, "success")
+        assert len(logger.operations) == 1
+        entry = logger.operations[0]
+        assert entry["operation"] == "test_op"
+        assert entry["parameters"] == {"k": "v"}
+        assert entry["result"] == "success"
+        # ISO-formatted timestamp string
+        assert isinstance(entry["timestamp"], str)
+        assert "T" in entry["timestamp"]
+
+    def test_default_result_is_success(
+        self, _fresh_operation_logger: Any
+    ) -> None:
+        logger = OperationLogger()
+        logger.log_operation("op", {})
+        assert logger.operations[0]["result"] == "success"
+
+    def test_get_recent_operations_returns_last_n_in_order(
+        self, _fresh_operation_logger: Any
+    ) -> None:
+        logger = OperationLogger()
+        for i in range(20):
+            logger.log_operation(f"op_{i}", {})
+        recent = logger.get_recent_operations(limit=5)
+        assert len(recent) == 5
+        assert [e["operation"] for e in recent] == [
+            "op_15",
+            "op_16",
+            "op_17",
+            "op_18",
+            "op_19",
+        ]
+
+    def test_get_recent_operations_default_limit_10(
+        self, _fresh_operation_logger: Any
+    ) -> None:
+        logger = OperationLogger()
+        for i in range(15):
+            logger.log_operation(f"op_{i}", {})
+        assert len(logger.get_recent_operations()) == 10
+
+    def test_singleton_is_shared(self, _fresh_operation_logger: Any) -> None:
+        """`operation_logger` is a module-level instance reused everywhere."""
+        operation_logger.log_operation("op_a", {"a": 1})
+        operation_logger.log_operation("op_b", {"b": 2})
+        assert len(operation_logger.operations) == 2
+
+
+class TestRateLimitDenyIsLogged:
+    """check_rate_limit auto-logs `rate_limited` on deny."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, monkeypatch: pytest.MonkeyPatch) -> Any:
+        rate_limiter.reset()
+        operation_logger.operations.clear()
+        fake_now = [0.0]
+        monkeypatch.setattr(
+            "apple_contacts_mcp.security.time.monotonic", lambda: fake_now[0]
+        )
+        yield
+        operation_logger.operations.clear()
+        rate_limiter.reset()
+
+    def test_allow_path_does_not_log(self) -> None:
+        assert check_rate_limit("list_contacts") is None
+        assert operation_logger.operations == []
+
+    def test_deny_appends_rate_limited_entry(self) -> None:
+        for _ in range(TIER_LIMITS["destructives"][0]):
+            assert check_rate_limit("delete_contact") is None
+        # 6th call denies
+        denied = check_rate_limit("delete_contact")
+        assert denied is not None
+        assert len(operation_logger.operations) == 1
+        entry = operation_logger.operations[0]
+        assert entry["operation"] == "delete_contact"
+        assert entry["result"] == "rate_limited"
+
+    def test_unmapped_operation_does_not_log(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Unknown ops pass through (fail open) and don't log a deny."""
+        with caplog.at_level("WARNING"):
+            assert check_rate_limit("never_heard_of_it") is None
+        assert operation_logger.operations == []
+
+
+class TestSafetyViolationIsLogged:
+    """check_test_mode_safety + require_test_mode_for deny paths log
+    `safety_violation` via _safety_error."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self) -> Any:
+        operation_logger.operations.clear()
+        _get_test_group_identifiers.cache_clear()
+        yield
+        operation_logger.operations.clear()
+
+    def test_missing_test_group_logs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.delenv("CONTACTS_TEST_GROUP", raising=False)
+        err = check_test_mode_safety("create_contact", group="X")
+        assert err is not None
+        assert err["error_type"] == "safety_violation"
+        assert len(operation_logger.operations) == 1
+        assert operation_logger.operations[0]["result"] == "safety_violation"
+        assert operation_logger.operations[0]["operation"] == "create_contact"
+
+    def test_group_mismatch_logs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
+        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
+        with patch(
+            "apple_contacts_mcp.security._get_test_group_identifiers",
+            return_value=frozenset({"MCP-Test"}),
+        ):
+            err = check_test_mode_safety(
+                "create_contact", group="WrongGroup"
+            )
+        assert err is not None
+        assert err["error_type"] == "safety_violation"
+        assert len(operation_logger.operations) == 1
+        assert operation_logger.operations[0]["result"] == "safety_violation"
+
+    def test_require_test_mode_for_outside_test_mode_logs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        err = require_test_mode_for("delete_contact")
+        assert err is not None
+        assert err["error_type"] == "safety_violation"
+        assert len(operation_logger.operations) == 1
+        assert operation_logger.operations[0]["operation"] == "delete_contact"
+        assert operation_logger.operations[0]["result"] == "safety_violation"
+
+    def test_allowed_safety_check_does_not_log(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
+        assert check_test_mode_safety("create_contact", group="X") is None
+        assert operation_logger.operations == []
+
+
+class TestConfirmDestructiveCancelledIsLogged:
+    """_confirm_destructive logs `cancelled` on user decline / cancel /
+    explicit-no, but not on accepted-yes."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self) -> Any:
+        operation_logger.operations.clear()
+        yield
+        operation_logger.operations.clear()
+
+    @pytest.mark.asyncio
+    async def test_declined_logs_cancelled(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from fastmcp.server.elicitation import DeclinedElicitation
+
+        from apple_contacts_mcp.security import _confirm_destructive
+
+        ctx = MagicMock()
+        ctx.elicit = AsyncMock(return_value=DeclinedElicitation())
+        result = await _confirm_destructive(
+            ctx,
+            operation="delete_contact",
+            entity_kind="contact",
+            identifier="abc:ABPerson",
+            preview_lookup=lambda: {"id": "abc:ABPerson", "given_name": "X"},
+            describe=lambda p: "X",
+        )
+        assert result is not None
+        assert result["error_type"] == "user_declined"
+        assert len(operation_logger.operations) == 1
+        entry = operation_logger.operations[0]
+        assert entry["operation"] == "delete_contact"
+        assert entry["result"] == "cancelled"
+        assert entry["parameters"]["entity_kind"] == "contact"
+        assert entry["parameters"]["identifier"] == "abc:ABPerson"
+        assert entry["parameters"]["action"] == "declined"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_logs_cancelled(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from fastmcp.server.elicitation import CancelledElicitation
+
+        from apple_contacts_mcp.security import _confirm_destructive
+
+        ctx = MagicMock()
+        ctx.elicit = AsyncMock(return_value=CancelledElicitation())
+        await _confirm_destructive(
+            ctx,
+            operation="delete_group",
+            entity_kind="group",
+            identifier="grp-1",
+            preview_lookup=lambda: {"id": "grp-1", "name": "X"},
+            describe=lambda p: "X",
+        )
+        assert len(operation_logger.operations) == 1
+        assert operation_logger.operations[0]["result"] == "cancelled"
+        assert operation_logger.operations[0]["parameters"]["action"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_accepted_yes_does_not_log(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from fastmcp.server.elicitation import AcceptedElicitation
+
+        from apple_contacts_mcp.security import _confirm_destructive
+
+        ctx = MagicMock()
+        ctx.elicit = AsyncMock(
+            return_value=AcceptedElicitation(data="Yes, delete")
+        )
+        result = await _confirm_destructive(
+            ctx,
+            operation="delete_contact",
+            entity_kind="contact",
+            identifier="abc",
+            preview_lookup=lambda: {"id": "abc"},
+            describe=lambda p: "abc",
+        )
+        assert result is None
+        assert operation_logger.operations == []
+
+    @pytest.mark.asyncio
+    async def test_elicit_unsupported_logs_safety_violation(self) -> None:
+        """When the client raises on elicit, the function falls through to
+        _safety_error which logs safety_violation (not cancelled)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from apple_contacts_mcp.security import _confirm_destructive
+
+        ctx = MagicMock()
+        ctx.elicit = AsyncMock(side_effect=RuntimeError("no elicit support"))
+        result = await _confirm_destructive(
+            ctx,
+            operation="delete_contact",
+            entity_kind="contact",
+            identifier="abc",
+            preview_lookup=lambda: {"id": "abc"},
+            describe=lambda p: "abc",
+        )
+        assert result is not None
+        assert result["error_type"] == "safety_violation"
+        assert len(operation_logger.operations) == 1
+        assert operation_logger.operations[0]["result"] == "safety_violation"

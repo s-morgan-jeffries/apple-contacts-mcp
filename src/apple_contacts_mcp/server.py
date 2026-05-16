@@ -17,6 +17,7 @@ from .security import (
     _is_test_mode_enabled,
     check_rate_limit,
     check_test_mode_safety,
+    operation_logger,
 )
 from .utils import detect_image_format
 
@@ -92,6 +93,7 @@ def check_authorization() -> dict[str, Any]:
     response: dict[str, Any] = {"success": True, "status": status}
     if status not in ("authorized", "limited"):
         response["remediation"] = _AUTH_REMEDIATION[status]
+    operation_logger.log_operation("check_authorization", {"status": status}, "success")
     return response
 
 
@@ -251,6 +253,11 @@ def list_contacts(offset: int = 0, limit: int = 50) -> dict[str, Any]:
         if auth_revoked is not None:
             return auth_revoked
 
+    operation_logger.log_operation(
+        "list_contacts",
+        {"offset": offset, "limit": effective_limit, "count": len(contacts)},
+        "success",
+    )
     return {
         "success": True,
         "contacts": contacts,
@@ -337,6 +344,11 @@ def get_contact(
             "error_type": "not_found",
         }
 
+    operation_logger.log_operation(
+        "get_contact",
+        {"identifier": identifier, "include_niche": include_niche},
+        "success",
+    )
     return {"success": True, "contact": contact}
 
 
@@ -432,6 +444,11 @@ def search_contacts(
         if auth_revoked is not None:
             return auth_revoked
 
+    operation_logger.log_operation(
+        "search_contacts",
+        {"search_field": field, "count": len(contacts)},
+        "success",
+    )
     return {
         "success": True,
         "contacts": contacts,
@@ -488,6 +505,9 @@ def list_containers() -> dict[str, Any]:
         auth_revoked = _verify_authorization_still_granted()
         if auth_revoked is not None:
             return auth_revoked
+    operation_logger.log_operation(
+        "list_containers", {"count": len(capped)}, "success"
+    )
     return {
         "success": True,
         "containers": capped,
@@ -536,6 +556,9 @@ def list_groups() -> dict[str, Any]:
         auth_revoked = _verify_authorization_still_granted()
         if auth_revoked is not None:
             return auth_revoked
+    operation_logger.log_operation(
+        "list_groups", {"count": len(capped)}, "success"
+    )
     return {
         "success": True,
         "groups": capped,
@@ -602,6 +625,11 @@ def get_contacts_in_group(identifier: str) -> dict[str, Any]:
         if auth_revoked is not None:
             return auth_revoked
 
+    operation_logger.log_operation(
+        "get_contacts_in_group",
+        {"group_identifier": identifier, "count": len(contacts)},
+        "success",
+    )
     return {
         "success": True,
         "group_identifier": identifier,
@@ -914,6 +942,23 @@ def create_contact(
     if auth_revoked is not None:
         return auth_revoked
 
+    operation_logger.log_operation(
+        "create_contact",
+        {
+            "container_identifier": container_identifier,
+            "group_identifier": group_identifier,
+            "phone_count": len(fields["phones"]),
+            "email_count": len(fields["emails"]),
+            "url_count": len(fields["urls"]),
+            "postal_count": len(fields["postal_addresses"]),
+            "has_birthday": fields["birthday"] is not None,
+            "date_count": len(fields["dates"]),
+            "social_count": len(fields["social_profiles"]),
+            "relation_count": len(fields["relations"]),
+            "im_count": len(fields["instant_messages"]),
+        },
+        "success",
+    )
     return {
         "success": True,
         "identifier": identifier,
@@ -1054,6 +1099,15 @@ def update_contact(
     if auth_revoked is not None:
         return auth_revoked
 
+    operation_logger.log_operation(
+        "update_contact",
+        {
+            "identifier": identifier,
+            "group_identifier": group_identifier,
+            "fields_updated": sorted(fields.keys()),
+        },
+        "success",
+    )
     return {"success": True, "identifier": identifier}
 
 
@@ -1147,6 +1201,11 @@ async def delete_contact(
     if auth_revoked is not None:
         return auth_revoked
 
+    operation_logger.log_operation(
+        "delete_contact",
+        {"identifier": identifier, "group_identifier": group_identifier},
+        "success",
+    )
     return {"success": True, "identifier": identifier}
 
 
@@ -1211,6 +1270,11 @@ def export_vcard(identifiers: list[str]) -> dict[str, Any]:
             "error_type": "unknown",
         }
 
+    operation_logger.log_operation(
+        "export_vcard",
+        {"identifier_count": len(identifiers), "vcard_size_bytes": len(vcard)},
+        "success",
+    )
     return {
         "success": True,
         "vcard": vcard,
@@ -1312,6 +1376,15 @@ def import_vcard(
     if auth_revoked is not None:
         return auth_revoked
 
+    operation_logger.log_operation(
+        "import_vcard",
+        {
+            "group_identifier": group_identifier,
+            "vcard_size_bytes": len(vcard_text),
+            "identifier_count": len(identifiers),
+        },
+        "success",
+    )
     return {
         "success": True,
         "identifiers": identifiers,
@@ -1371,6 +1444,11 @@ def read_note(identifier: str) -> dict[str, Any]:
             "error_type": "unknown",
         }
 
+    operation_logger.log_operation(
+        "read_note",
+        {"identifier": identifier, "note_length": len(note)},
+        "success",
+    )
     return {"success": True, "identifier": identifier, "note": note}
 
 
@@ -1437,6 +1515,15 @@ def write_note(
     if auth_revoked is not None:
         return auth_revoked
 
+    operation_logger.log_operation(
+        "write_note",
+        {
+            "identifier": identifier,
+            "group_identifier": group_identifier,
+            "note_length": len(note),
+        },
+        "success",
+    )
     return {"success": True, "identifier": identifier}
 
 
@@ -1494,6 +1581,11 @@ def read_photo(identifier: str) -> dict[str, Any]:
         }
 
     if not photo["available"]:
+        operation_logger.log_operation(
+            "read_photo",
+            {"identifier": identifier, "has_photo": False},
+            "success",
+        )
         return {
             "success": True,
             "identifier": identifier,
@@ -1503,11 +1595,22 @@ def read_photo(identifier: str) -> dict[str, Any]:
         }
 
     raw = photo["image_data"]
+    photo_format = detect_image_format(raw)
+    operation_logger.log_operation(
+        "read_photo",
+        {
+            "identifier": identifier,
+            "has_photo": True,
+            "size_bytes": len(raw),
+            "format": photo_format,
+        },
+        "success",
+    )
     return {
         "success": True,
         "identifier": identifier,
         "image_data": base64.b64encode(raw).decode("ascii"),
-        "format": detect_image_format(raw),
+        "format": photo_format,
         "size_bytes": len(raw),
     }
 
@@ -1597,6 +1700,16 @@ def write_photo(
     if auth_revoked is not None:
         return auth_revoked
 
+    operation_logger.log_operation(
+        "write_photo",
+        {
+            "identifier": identifier,
+            "group_identifier": group_identifier,
+            "size_bytes": len(decoded) if decoded is not None else 0,
+            "clearing": decoded is None,
+        },
+        "success",
+    )
     return {"success": True, "identifier": identifier}
 
 
@@ -1675,6 +1788,14 @@ def add_contact_to_group(
     if auth_revoked is not None:
         return auth_revoked
 
+    operation_logger.log_operation(
+        "add_contact_to_group",
+        {
+            "contact_identifier": contact_identifier,
+            "group_identifier": group_identifier,
+        },
+        "success",
+    )
     return {
         "success": True,
         "contact_identifier": contact_identifier,
@@ -1752,6 +1873,14 @@ def remove_contact_from_group(
     if auth_revoked is not None:
         return auth_revoked
 
+    operation_logger.log_operation(
+        "remove_contact_from_group",
+        {
+            "contact_identifier": contact_identifier,
+            "group_identifier": group_identifier,
+        },
+        "success",
+    )
     return {
         "success": True,
         "contact_identifier": contact_identifier,
@@ -1825,6 +1954,15 @@ def create_group(
     if auth_revoked is not None:
         return auth_revoked
 
+    operation_logger.log_operation(
+        "create_group",
+        {
+            "name_length": len(name),
+            "container_identifier": container_identifier,
+            "group_identifier": group_identifier,
+        },
+        "success",
+    )
     return {"success": True, "group": group}
 
 
@@ -1897,6 +2035,15 @@ def rename_group(
     if auth_revoked is not None:
         return auth_revoked
 
+    operation_logger.log_operation(
+        "rename_group",
+        {
+            "identifier": identifier,
+            "new_name_length": len(new_name),
+            "group_identifier": group_identifier,
+        },
+        "success",
+    )
     return {"success": True, "group": group}
 
 
@@ -1988,6 +2135,11 @@ async def delete_group(
     if auth_revoked is not None:
         return auth_revoked
 
+    operation_logger.log_operation(
+        "delete_group",
+        {"identifier": identifier, "group_identifier": group_identifier},
+        "success",
+    )
     return {"success": True, "identifier": identifier}
 
 

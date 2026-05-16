@@ -14,6 +14,7 @@ import subprocess
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -175,9 +176,71 @@ def require_test_mode_for(operation: str) -> dict[str, Any] | None:
     return None
 
 
-def _safety_error(operation: str, message: str) -> dict[str, Any]:
-    """Build the standard safety-violation error dict."""
+# ---------------------------------------------------------------------------
+# Operation audit log (#47)
+#
+# Append-only in-memory record of every tool invocation. Mirrors
+# `apple-mail-mcp/security.py::OperationLogger`. The contacts version curates
+# parameters at the call site — never log name/email/phone/URL/note content
+# or photo bytes; only identifiers, counts, lengths, and field-name lists.
+#
+# Tool bodies emit "success" entries on the happy path. The three security
+# primitives (`check_rate_limit`, `_safety_error`, `_confirm_destructive`)
+# emit their own deny entries so tool bodies stay single-purpose.
+# ---------------------------------------------------------------------------
+
+
+class OperationLogger:
+    """Append-only audit log of tool invocations.
+
+    `result` is one of: "success", "rate_limited", "safety_violation",
+    "cancelled". Denied results are emitted by the security primitive that
+    rejected the call; tool bodies only emit "success".
+    """
+
+    def __init__(self) -> None:
+        self.operations: list[dict[str, Any]] = []
+
+    def log_operation(
+        self,
+        operation: str,
+        parameters: dict[str, Any],
+        result: str = "success",
+    ) -> None:
+        self.operations.append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "operation": operation,
+                "parameters": parameters,
+                "result": result,
+            }
+        )
+        logger.info("Operation logged: %s - %s", operation, result)
+
+    def get_recent_operations(self, limit: int = 10) -> list[dict[str, Any]]:
+        return self.operations[-limit:]
+
+
+# Module singleton. Tests clear `operations` between cases.
+operation_logger = OperationLogger()
+
+
+def _safety_error(
+    operation: str,
+    message: str,
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the standard safety-violation error dict and log it.
+
+    `params` is logged to `operation_logger` on the safety-violation entry.
+    When unset, falls back to `{"violation": message}` so the audit entry
+    is meaningfully shaped even when the caller doesn't thread its own
+    params (matches apple-mail's pattern).
+    """
     logger.warning("Safety violation in %s: %s", operation, message)
+    operation_logger.log_operation(
+        operation, params if params is not None else {"violation": message}, "safety_violation"
+    )
     return {
         "success": False,
         "error": message,
@@ -294,6 +357,11 @@ async def _confirm_destructive(
         identifier,
         description,
     )
+    operation_logger.log_operation(
+        operation,
+        {"entity_kind": entity_kind, "identifier": identifier, "action": action},
+        "cancelled",
+    )
     return {
         "success": False,
         "error": (
@@ -394,16 +462,16 @@ def check_rate_limit(
 ) -> dict[str, Any] | None:
     """Returns None if the call is allowed; a rate_limited error dict if not.
 
-    ``params`` is accepted for parity with apple-mail's signature; eventually
-    fed to the audit logger (#47) on deny. Currently unused.
+    ``params`` is logged to ``operation_logger`` on deny so the audit trail
+    records what the caller was trying to do when the gate fired. Tool-body
+    callers pass no params today; the empty dict still shapes the audit
+    entry consistently.
 
     Unknown operations pass through with a logger warning — the rate limiter
     fails open if a tool ships without a tier mapping, so a missed
     OPERATION_TIERS entry won't brick the server. Release-gate parity
-    checks should catch the missing mapping at PR time once #46 wires
-    this in.
+    checks catch the missing mapping at PR time.
     """
-    _ = params  # accepted for forward-compat with #47
     tier = OPERATION_TIERS.get(operation)
     if tier is None:
         logger.warning(
@@ -414,6 +482,7 @@ def check_rate_limit(
         return None
     if rate_limiter.check(tier):
         return None
+    operation_logger.log_operation(operation, params or {}, "rate_limited")
     max_calls, window = TIER_LIMITS[tier]
     return {
         "success": False,
