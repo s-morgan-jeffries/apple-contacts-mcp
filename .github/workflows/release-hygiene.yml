@@ -32,6 +32,9 @@ jobs:
       - name: Client-server parity check
         run: ./scripts/check_client_server_parity.sh
 
+      - name: PyObjC safety check
+        run: ./scripts/check_pyobjc_safety.sh
+
       - name: Verify milestone status
         run: |
           TAG="${GITHUB_REF_NAME}"

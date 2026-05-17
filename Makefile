@@ -61,6 +61,7 @@ complexity:
 audit:
 	@./scripts/check_dependencies.sh
 	@./scripts/check_readme_claims.sh
+	@./scripts/check_pyobjc_safety.sh
 
 coverage:
 	uv run pytest tests/ -m "not integration and not e2e and not benchmark" --cov=apple_contacts_mcp --cov-report=term-missing -q

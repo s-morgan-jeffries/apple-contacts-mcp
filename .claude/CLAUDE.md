@@ -28,4 +28,4 @@ JXA contributes nothing SDEF doesn't expose — out of scope.
 vCard via `CNContactVCardSerialization` is a serialization helper (3.0 only, even on macOS 26).
 
 Full empirical basis: [`docs/research/contacts-api-gap-analysis.md`](../docs/research/contacts-api-gap-analysis.md).
-Decision drives: skill name `contacts-framework` (BOOTSTRAP §4.2); paired `check_pyobjc_safety.sh` alongside `check_applescript_safety.sh` (deferred to v0.4.0); `_run_cn_*` + `_run_applescript_*` mock boundaries in `contacts_connector.py`.
+Decision drives: skill name `contacts-framework` (BOOTSTRAP §4.2); `scripts/check_pyobjc_safety.sh` enforcing five anti-patterns (KVC dynamic keys, vCard descriptor, photo-data guard, TCC pre-check, test-mode safety) — shipped #31; paired `check_applescript_safety.sh` still deferred; `_run_cn_*` + `_run_applescript_*` mock boundaries in `contacts_connector.py`.
