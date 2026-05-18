@@ -41,7 +41,16 @@ gh repo create apple-contacts-mcp --public --source=. \
   --description "MCP server for Apple Contacts on macOS"
 ```
 
-Set branch protection on `main` (required CI checks, no direct pushes) once CI is green.
+Set branch protection on `main` once CI is green:
+
+```bash
+./scripts/configure_branch_protection.sh
+```
+
+Captures the required `Tests / unit-tests` check, PR-only merges, linear
+history, `enforce_admins`, and bans force-pushes and deletions. Idempotent
+— re-run to surface drift or reapply after an accidental settings change.
+The exact PUT payload is in the script for auditability (#32).
 
 ### 1.2 Scaffold the layout (per `MCP_PLAYBOOK.md §2`)
 
