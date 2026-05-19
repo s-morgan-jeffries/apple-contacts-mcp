@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `scripts/configure_branch_protection.sh` listed the required status check as `"Tests / unit-tests"` (workflow-name + job-id form). GitHub Actions actually reports the check-run name as just `"unit-tests"` (the job id from `.github/workflows/test.yml`), so the mismatch left PRs in `mergeStateStatus=BLOCKED` because no incoming status matched the required context. Fix: protection now requires `"unit-tests"`. BOOTSTRAP.md updated to match. The live `main` protection was patched directly via `gh api` ahead of this PR so PR #88 could merge through the normal flow; this script change keeps re-runs idempotent.
+
 ### Added
 
 - `tests/integration/test_modification_dates.py` — durability regression test for the undocumented `CNContact` runtime selectors `creationDate` and `modificationDate`. Fetches a freshly-created contact via `unifiedContactWithIdentifier_keysToFetch_error_` with the selectors as string key paths, calls each selector, and asserts the return is a non-None `datetime`. On failure, the diagnostic points to the AppleScript fallback (`creation date of person`, `modification date of person`) per SKILL.md §2. Closes gap-analysis Q2; the question is now empirically gated rather than open (#33).

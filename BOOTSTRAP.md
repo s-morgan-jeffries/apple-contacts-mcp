@@ -47,7 +47,7 @@ Set branch protection on `main` once CI is green:
 ./scripts/configure_branch_protection.sh
 ```
 
-Captures the required `Tests / unit-tests` check, PR-only merges, linear
+Captures the required `unit-tests` check, PR-only merges, linear
 history, `enforce_admins`, and bans force-pushes and deletions. Idempotent
 — re-run to surface drift or reapply after an accidental settings change.
 The exact PUT payload is in the script for auditability (#32).
