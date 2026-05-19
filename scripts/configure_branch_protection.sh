@@ -6,8 +6,11 @@
 # reapply after an accidental settings change.
 #
 # Settings applied:
-#   - Required status checks: "Tests / unit-tests" (strict: branch must
-#     be up to date with the base before merge).
+#   - Required status checks: "unit-tests" (strict: branch must be up to
+#     date with the base before merge). Context name is the job-id from
+#     .github/workflows/test.yml, NOT the "<workflow> / <job>" form GitHub
+#     sometimes shows in the UI — the GraphQL CheckRun "name" is the
+#     authoritative match.
 #   - PR required (no direct pushes); zero reviews required (solo repo —
 #     GitHub prohibits self-approval, so requiring reviews would block
 #     self-merges).
@@ -34,7 +37,7 @@ PAYLOAD=$(cat <<'JSON'
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["Tests / unit-tests"]
+    "contexts": ["unit-tests"]
   },
   "enforce_admins": true,
   "required_pull_request_reviews": null,
