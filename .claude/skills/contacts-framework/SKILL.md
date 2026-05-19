@@ -204,7 +204,7 @@ AppleScript-bound string MUST go through
 
 `CNContact.creationDate` and `CNContact.modificationDate` are accessible only via undocumented runtime selectors — not in the public `CNContactKey` constants. If a future macOS removes the selectors, the AppleScript fallback (`creation date of person`, `modification date of person`) is still standard scripting bridge.
 
-A regression test that fails loudly if the selectors disappear is tracked under [issue #29](https://github.com/s-morgan-jeffries/apple-contacts-mcp/issues/29) (v0.4.0).
+Durability is verified by [`tests/integration/test_modification_dates.py`](../../../tests/integration/test_modification_dates.py) — runs in the integration suite, asserts both selectors are bridged and return `datetime` objects. Failure includes a pointer to the AppleScript fallback (#33).
 
 ## Multi-container behavior
 
