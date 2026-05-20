@@ -49,7 +49,7 @@ make test-integration  # Real Contacts.app tests
    - **Bug fixes:** include a regression test that fails before your fix and passes after.
    - **AppleScript changes:** an integration test under `tests/integration/`.
 3. Update `docs/reference/TOOLS.md` if you added/changed a tool
-4. PR description references the issue (`Closes #N`)
+4. PR description references the issue (`Closes #N`). The `pr-hygiene` workflow posts a non-blocking comment if a `(#N)` reference in the PR title has no close keyword in the title or body — fix it before merge so the issue auto-closes.
 
 ## Coding Standards
 

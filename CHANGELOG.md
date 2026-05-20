@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `.github/workflows/pr-hygiene.yml` + `scripts/check_pr_close_keywords.py` — non-blocking check that posts a PR comment when the title references an issue via `(#N)` but neither the title nor body contains a close keyword (`closes`, `fixes`, `resolves`, all tenses, case-insensitive). The comment uses an HTML-comment marker for find-and-edit on subsequent title edits (no spam). When the gap is closed, the comment auto-updates to a "resolved" confirmation. Runs on `pull_request` `opened`/`edited`/`synchronize` events. CI never fails. Prevents the silent miss-and-close-by-hand seen on PR #82 (#83).
+
 ### Fixed
 
 - `scripts/configure_branch_protection.sh` listed the required status check as `"Tests / unit-tests"` (workflow-name + job-id form). GitHub Actions actually reports the check-run name as just `"unit-tests"` (the job id from `.github/workflows/test.yml`), so the mismatch left PRs in `mergeStateStatus=BLOCKED` because no incoming status matched the required context. Fix: protection now requires `"unit-tests"`. BOOTSTRAP.md updated to match. The live `main` protection was patched directly via `gh api` ahead of this PR so PR #88 could merge through the normal flow; this script change keeps re-runs idempotent.
