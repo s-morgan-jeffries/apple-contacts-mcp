@@ -1,0 +1,70 @@
+name: PR Hygiene
+
+# Non-blocking check: flags `(#N)` references in the PR title that lack a
+# GitHub close keyword (`closes`, `fixes`, `resolves` + tenses) anywhere
+# in the title or body. Posts a comment on the PR; never fails CI.
+# Issue #83.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+    branches: [main]
+
+jobs:
+  close-keyword-check:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check close keywords
+        id: check
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 scripts/check_pr_close_keywords.py > comment.md
+          if [ -s comment.md ]; then
+            echo "has_message=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_message=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Find existing bot comment
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          ID=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" \
+              --jq '.[] | select(.body | contains("<!-- pr-close-keyword-check -->")) | .id' \
+              | head -n 1)
+          echo "comment_id=$ID" >> "$GITHUB_OUTPUT"
+
+      - name: Post or edit comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          ID="${{ steps.find.outputs.comment_id }}"
+          HAS_MSG="${{ steps.check.outputs.has_message }}"
+          if [ "$HAS_MSG" = "true" ]; then
+            BODY=$(cat comment.md)
+          else
+            # No gap → if a stale bot comment exists, update it to "resolved"
+            # so the maintainer sees the fix took effect; otherwise no-op.
+            if [ -z "$ID" ]; then
+              echo "No gap and no existing comment; nothing to do."
+              exit 0
+            fi
+            BODY=$'> [!TIP]\n> All `(#N)` references in the title now have close keywords. The referenced issue(s) will auto-close on merge.\n>\n> <!-- pr-close-keyword-check -->'
+          fi
+          if [ -n "$ID" ]; then
+            echo "Editing existing bot comment $ID"
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$ID" \
+              -f body="$BODY" >/dev/null
+          else
+            echo "Creating new bot comment"
+            gh pr comment "$PR" --body "$BODY"
+          fi
