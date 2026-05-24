@@ -128,7 +128,7 @@ The completion handler runs on a background queue. For a synchronous CLI flow, p
 
 ### Bundling note
 
-Running unbundled (`uv run python -m apple_contacts_mcp.server`) prompts via the launching process's TCC identity. When packaged into Claude Desktop, an `Info.plist` `NSContactsUsageDescription` key is required for the prompt copy. **This needs to be re-tested after packaging is set up; not relevant for the unbundled v0.1.0 release.**
+Running unbundled (`uv run python -m apple_contacts_mcp.server`) prompts via the launching process's TCC identity. When packaged into Claude Desktop, an `Info.plist` `NSContactsUsageDescription` key is required for the prompt copy. The scaffold artifact lives at [`packaging/Info.plist`](../../packaging/Info.plist) (issue #34, v0.4.0) — locked by `tests/unit/test_packaging.py` and version-synced via `scripts/check_version_sync.sh`. **The actual bundling tool (py2app / briefcase / PyInstaller) is not yet selected; the empirical "re-test after packaging is set up" still applies to whichever release first ships a `.app` bundle.**
 
 ## 4. Working code samples
 
