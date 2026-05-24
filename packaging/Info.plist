@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bundle metadata scaffold for a future .app distribution.
+
+    The current launch path (`uv run python -m apple_contacts_mcp.server` /
+    `apple-contacts-mcp` console script) is UNBUNDLED — macOS reads the Python
+    interpreter's Info.plist for that process, not this file. This file becomes
+    load-bearing only when a bundling tool (py2app, briefcase, PyInstaller, …)
+    produces a `.app` and copies this plist into Contents/.
+
+    Until then it ships so the artifact contract is fixed, version-synced
+    (CFBundleShortVersionString / CFBundleVersion enforced by
+    scripts/check_version_sync.sh), and locked by tests/unit/test_packaging.py.
+
+    Closes issue #34. See docs/research/contacts-api-gap-analysis.md §3.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.morganjeffries.apple-contacts-mcp</string>
+
+    <key>CFBundleName</key>
+    <string>Apple Contacts MCP</string>
+
+    <key>CFBundleDisplayName</key>
+    <string>Apple Contacts MCP</string>
+
+    <key>CFBundleExecutable</key>
+    <string>apple-contacts-mcp</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>0.3.0</string>
+
+    <key>CFBundleVersion</key>
+    <string>0.3.0</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+
+    <key>LSUIElement</key>
+    <true/>
+
+    <key>NSContactsUsageDescription</key>
+    <string>Apple Contacts MCP needs access to your contacts so the AI assistant can search, read, and edit them on your behalf.</string>
+
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Morgan Jeffries. MIT License.</string>
+</dict>
+</plist>

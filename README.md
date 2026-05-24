@@ -31,9 +31,29 @@ uv sync --dev
 
 ## Usage
 
-The server entry point is registered as `apple-contacts-mcp` (see `pyproject.toml [project.scripts]`). Configure it in Claude Desktop's MCP settings to expose the tool list above.
+The server entry point is registered as `apple-contacts-mcp` (see `pyproject.toml [project.scripts]`). Add the server to your `claude_desktop_config.json` (typically at `~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "apple-contacts": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/absolute/path/to/apple-contacts-mcp",
+        "python",
+        "-m",
+        "apple_contacts_mcp.server"
+      ]
+    }
+  }
+}
+```
 
 First run will trigger the system TCC permission prompt. Grant access in System Settings → Privacy & Security → Contacts. See `check_authorization`'s response shape in [TOOLS.md](docs/reference/TOOLS.md#check_authorization) for the recovery flow if access was denied.
+
+A scaffold [`packaging/Info.plist`](packaging/Info.plist) ships with the repo (`NSContactsUsageDescription` for the TCC dialog copy, plus standard bundle keys). It's not consumed by the unbundled launch path above — it's there for future bundling work.
 
 ## Development
 
