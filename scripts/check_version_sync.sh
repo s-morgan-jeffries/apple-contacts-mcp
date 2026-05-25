@@ -39,22 +39,6 @@ if [ -f ".claude/CLAUDE.md" ]; then
     fi
 fi
 
-# Check packaging/Info.plist (CFBundleShortVersionString + CFBundleVersion)
-if [ -f "packaging/Info.plist" ]; then
-    PLIST_SHORT=$(plutil -extract CFBundleShortVersionString raw packaging/Info.plist 2>/dev/null || echo "")
-    PLIST_VERSION=$(plutil -extract CFBundleVersion raw packaging/Info.plist 2>/dev/null || echo "")
-    echo "  Info.plist short:  $PLIST_SHORT"
-    echo "  Info.plist bundle: $PLIST_VERSION"
-    if [ "$PLIST_SHORT" != "$PYPROJECT_VERSION" ]; then
-        echo "  ERROR: Info.plist CFBundleShortVersionString mismatch!"
-        ERRORS=$((ERRORS + 1))
-    fi
-    if [ "$PLIST_VERSION" != "$PYPROJECT_VERSION" ]; then
-        echo "  ERROR: Info.plist CFBundleVersion mismatch!"
-        ERRORS=$((ERRORS + 1))
-    fi
-fi
-
 # Check CHANGELOG.md
 if [ -f "CHANGELOG.md" ]; then
     CHANGELOG_VERSION=$(grep '^## \[' CHANGELOG.md | grep -v 'Unreleased' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")

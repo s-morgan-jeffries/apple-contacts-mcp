@@ -31,29 +31,22 @@ uv sync --dev
 
 ## Usage
 
-The server entry point is registered as `apple-contacts-mcp` (see `pyproject.toml [project.scripts]`). Add the server to your `claude_desktop_config.json` (typically at `~/Library/Application Support/Claude/claude_desktop_config.json`):
+After `uv sync --dev`, the server entry point is at `.venv/bin/apple-contacts-mcp`. Add it to your `claude_desktop_config.json` (typically at `~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "apple-contacts": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--directory",
-        "/absolute/path/to/apple-contacts-mcp",
-        "python",
-        "-m",
-        "apple_contacts_mcp.server"
-      ]
+      "command": "/absolute/path/to/apple-contacts-mcp/.venv/bin/apple-contacts-mcp",
+      "args": []
     }
   }
 }
 ```
 
-First run will trigger the system TCC permission prompt. Grant access in System Settings → Privacy & Security → Contacts. See `check_authorization`'s response shape in [TOOLS.md](docs/reference/TOOLS.md#check_authorization) for the recovery flow if access was denied.
+The direct venv-binary path is more robust than wrapping in `uv run`, because Claude Desktop spawns MCP servers with a stripped `PATH` that may not see `uv`.
 
-A scaffold [`packaging/Info.plist`](packaging/Info.plist) ships with the repo (`NSContactsUsageDescription` for the TCC dialog copy, plus standard bundle keys). It's not consumed by the unbundled launch path above — it's there for future bundling work.
+First contact with the Contacts framework will trigger a macOS TCC consent dialog. The dialog reads **"python-3.11 would like to search your contacts"** (or whichever Python version the venv uses) — macOS attaches the grant to the interpreter binary, not to this server's identity. Grant access there, or later in *System Settings → Privacy & Security → Contacts* (look for the "python-3.X" entry). See `check_authorization`'s response shape in [TOOLS.md](docs/reference/TOOLS.md#check_authorization) for the recovery flow if access was denied. Empirical context: [gap-analysis §3](docs/research/contacts-api-gap-analysis.md).
 
 ## Development
 
