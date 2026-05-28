@@ -4,4 +4,4 @@ Apple Contacts MCP Server.
 A Model Context Protocol server for Apple Contacts integration.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
