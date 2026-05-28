@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-28
+
+### Security
+
+- Bumped transitive deps `idna` 3.13 → 3.16 (CVE-2026-45409) and `starlette` 1.0.0 → 1.1.0 (PYSEC-2026-161) via `uv lock --upgrade-package`. Both pulled through `fastmcp`'s HTTP plumbing; neither is a direct project dep. Caught by `scripts/check_dependencies.sh` (`pip-audit`) during the v0.4.0 release-gate validation.
+
 ### Removed
 
 - **The `packaging/Info.plist` scaffold added under #34 (PR #92) is reverted.** Empirically verified: when Claude Desktop launches the venv shim, macOS attributes the Contacts TCC request to the **venv's `python-3.11` binary**, not to anything in this repo. The consent dialog reads "python-3.11 would like to search your contacts." Our `Info.plist` is never read on this launch path, and no bundling work would change that without breaking the MCP subprocess model. The `Info.plist` file, its `tests/unit/test_packaging.py` lock, and the `plutil -extract` version-sync block are all removed. README's `## Usage` section now documents the real attribution behavior so users aren't surprised by the python-3.11 dialog text. Gap-analysis §3 is rewritten to record the empirical finding instead of the open caveat. Closed v0.5.0 follow-ups #93–96 (bundling tool, signing, icon, localization) were filed on the same wrong premise and have already been closed as wrong-scope.

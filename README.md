@@ -2,7 +2,7 @@
 
 A Model Context Protocol server for Apple Contacts on macOS.
 
-**Version:** v0.3.0 — Phase 3 surface: containers, group CRUD, contact photos, niche fields. 21 tools total. See [docs/reference/TOOLS.md](docs/reference/TOOLS.md) for the API surface and [CHANGELOG.md](CHANGELOG.md) for release notes.
+**Version:** v0.4.0 — Infrastructure hardening: per-tool rate limiting, PII-curated audit log, post-call TCC re-verification, FastMCP-elicitation confirmation UX for destructive ops, coverage gate to 95%, PyObjC static safety analyzer, TOOLS.md ↔ `@mcp.tool()` parity check. Same 21 tools as v0.3.0 — no API surface changes. See [docs/reference/TOOLS.md](docs/reference/TOOLS.md) for the API surface and [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Tools
 

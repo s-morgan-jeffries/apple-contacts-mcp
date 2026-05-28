@@ -604,6 +604,11 @@ def get_contacts_in_group(identifier: str) -> dict[str, Any]:
     try:
         group = connector._run_cn_fetch_group(identifier)
         if group is None:
+            # `None` could be genuinely-not-found OR mid-call TCC revocation.
+            # Issue #37.
+            auth_revoked = _verify_authorization_still_granted()
+            if auth_revoked is not None:
+                return auth_revoked
             return {
                 "success": False,
                 "error": f"No group found with identifier {identifier!r}",
@@ -1574,6 +1579,11 @@ def read_photo(identifier: str) -> dict[str, Any]:
         }
 
     if photo is None:
+        # `None` could be genuinely-not-found OR mid-call TCC revocation
+        # (unifiedContactWithIdentifier returns None for both). Issue #37.
+        auth_revoked = _verify_authorization_still_granted()
+        if auth_revoked is not None:
+            return auth_revoked
         return {
             "success": False,
             "error": f"Contact not found: {identifier!r}",

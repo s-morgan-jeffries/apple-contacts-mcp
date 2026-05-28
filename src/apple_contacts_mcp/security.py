@@ -351,11 +351,10 @@ async def _confirm_destructive(
         action = "cancelled"
 
     logger.info(
-        "%s %s by user (identifier=%s, preview=%s)",
+        "%s %s by user (identifier=%s, has_preview=True)",
         operation,
         action,
         identifier,
-        description,
     )
     operation_logger.log_operation(
         operation,
