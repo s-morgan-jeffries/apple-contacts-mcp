@@ -24,7 +24,6 @@ from apple_contacts_mcp.security import (
     check_test_mode_safety,
     operation_logger,
     rate_limiter,
-    require_test_mode_for,
 )
 
 
@@ -216,43 +215,6 @@ def _subprocess_failure() -> Any:
         raise FileNotFoundError("osascript not available in test env")
 
     return _boom
-
-
-# ---------------------------------------------------------------------------
-# require_test_mode_for
-# ---------------------------------------------------------------------------
-
-
-class TestRequireTestModeFor:
-    def test_env_unset_returns_safety_violation(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
-        result = require_test_mode_for("delete_contact")
-        assert result is not None
-        assert result["error_type"] == "safety_violation"
-        assert "delete_contact" in result["error"]
-        assert "v0.4.0" in result["error"]
-
-    def test_env_false_returns_safety_violation(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("CONTACTS_TEST_MODE", "false")
-        result = require_test_mode_for("delete_contact")
-        assert result is not None
-        assert result["error_type"] == "safety_violation"
-
-    def test_env_true_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
-        assert require_test_mode_for("delete_contact") is None
-
-    def test_env_TRUE_case_insensitive(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("CONTACTS_TEST_MODE", "TRUE")
-        assert require_test_mode_for("delete_contact") is None
 
 
 # ---------------------------------------------------------------------------
@@ -538,8 +500,8 @@ class TestRateLimitDenyIsLogged:
 
 
 class TestSafetyViolationIsLogged:
-    """check_test_mode_safety + require_test_mode_for deny paths log
-    `safety_violation` via _safety_error."""
+    """check_test_mode_safety deny paths log `safety_violation`
+    via _safety_error."""
 
     @pytest.fixture(autouse=True)
     def _isolate(self) -> Any:
@@ -575,17 +537,6 @@ class TestSafetyViolationIsLogged:
         assert err is not None
         assert err["error_type"] == "safety_violation"
         assert len(operation_logger.operations) == 1
-        assert operation_logger.operations[0]["result"] == "safety_violation"
-
-    def test_require_test_mode_for_outside_test_mode_logs(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("CONTACTS_TEST_MODE", raising=False)
-        err = require_test_mode_for("delete_contact")
-        assert err is not None
-        assert err["error_type"] == "safety_violation"
-        assert len(operation_logger.operations) == 1
-        assert operation_logger.operations[0]["operation"] == "delete_contact"
         assert operation_logger.operations[0]["result"] == "safety_violation"
 
     def test_allowed_safety_check_does_not_log(
