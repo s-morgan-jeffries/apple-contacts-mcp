@@ -154,26 +154,6 @@ def _get_test_group_identifiers(test_group_name: str) -> frozenset[str]:
     return frozenset(identifiers)
 
 
-def require_test_mode_for(operation: str) -> dict[str, Any] | None:
-    """Refuses an operation when CONTACTS_TEST_MODE is not 'true'.
-
-    Use for destructive ops that lack a confirmation UX — they are
-    only safe to expose in test mode until v0.4.0 ships the
-    confirmation flow (#24).
-
-    Returns None when test mode is enabled; otherwise a structured
-    safety_violation error dict.
-    """
-    if not _is_test_mode_enabled():
-        return _safety_error(
-            operation,
-            f"{operation} is only available with CONTACTS_TEST_MODE=true. "
-            f"The full destructive UX (with confirmation prompts) ships "
-            f"in v0.4.0 (#36).",
-        )
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Operation audit log (#47)
 #

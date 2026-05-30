@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`get_contact` opt-in flags `include_photo` and `include_note`.** Mirror the existing `include_niche` pattern. Photo data appears as `contact.photo = {image_data, format, size_bytes}` (or `null` when absent); note appears as `contact.note`. Both add measurable cost — `include_note` spawns an AppleScript subprocess; `include_photo` can return megabytes of base64.
 - **`update_contact` parameters `photo` and `note`.** Follow the same value-based clearing semantics as the existing string fields: `None` = don't touch, `""` = clear, value = set. Write order is CN fields → photo → note; failures after the first successful write surface as `partial_success`.
 
+### Removed
+
+- **Dead `require_test_mode_for` guard deleted from `security.py`.** This was the v0.1–v0.3 stopgap that refused destructive ops unless `CONTACTS_TEST_MODE=true`, pending a real confirmation UX. v0.4.0 shipped that UX via FastMCP elicitation (`_confirm_destructive`, #36), leaving `require_test_mode_for` unwired from every tool and kept alive only by its own unit tests. No functional change (closes #100).
+
 ## [0.4.0] - 2026-05-28
 
 ### Security
