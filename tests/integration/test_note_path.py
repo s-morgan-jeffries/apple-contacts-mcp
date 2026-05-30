@@ -58,7 +58,9 @@ def test_applescript_id_matches_cn_identifier_with_abperson_suffix(
 
 
 # ---------------------------------------------------------------------------
-# read_note + write_note round-trip
+# AppleScript note read/write round-trip
+# (exercises the connector helpers backing get_contact(include_note=True)
+#  and update_contact(note=...) since v0.5.0 #98)
 # ---------------------------------------------------------------------------
 
 
@@ -82,7 +84,7 @@ def test_read_write_read_round_trip(
 def test_empty_string_clears_existing_note(
     real_connector: ContactsConnector, tmp_contact: str
 ) -> None:
-    """write_note(id, '') is the documented way to clear a note."""
+    """update_contact(id, note='') is the documented way to clear a note."""
     real_connector._run_applescript_write_note(tmp_contact, "non-empty")
     assert real_connector._run_applescript_read_note(tmp_contact) == "non-empty"
     real_connector._run_applescript_write_note(tmp_contact, "")

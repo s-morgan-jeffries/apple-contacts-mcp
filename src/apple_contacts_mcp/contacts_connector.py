@@ -1025,7 +1025,10 @@ class ContactsConnector:
         return identifier
 
     def _run_cn_unified_contact(
-        self, identifier: str, include_niche: bool = False
+        self,
+        identifier: str,
+        include_niche: bool = False,
+        include_photo: bool = False,
     ) -> dict[str, Any] | None:
         """Fetch a single contact by identifier with the full P1 key set.
 
@@ -1035,6 +1038,12 @@ class ContactsConnector:
         families (dates, social profiles, contact relations, instant
         messages) and includes them in the response. Default False —
         keeps responses compact for the common case.
+
+        When ``include_photo`` is True, also fetches photo data and
+        includes a ``"photo"`` key on the result: either
+        ``{"available": True, "image_data": <bytes>}`` (raw bytes; the
+        server tool layer base64-encodes + format-detects before sending
+        to the LLM), or ``{"available": False, "image_data": b""}``.
         """
         from Contacts import (
             CNContactBirthdayKey,
@@ -1086,6 +1095,13 @@ class ContactsConnector:
                     CNContactInstantMessageAddressesKey,
                 ]
             )
+        if include_photo:
+            from Contacts import (
+                CNContactImageDataAvailableKey,
+                CNContactImageDataKey,
+            )
+
+            keys.extend([CNContactImageDataKey, CNContactImageDataAvailableKey])
 
         store = self._get_store()
         contact, _err = store.unifiedContactWithIdentifier_keysToFetch_error_(
@@ -1093,7 +1109,12 @@ class ContactsConnector:
         )
         if contact is None:
             return None
-        return _serialize_contact(contact, CNLabeledValue, include_niche=include_niche)
+        return _serialize_contact(
+            contact,
+            CNLabeledValue,
+            include_niche=include_niche,
+            include_photo=include_photo,
+        )
 
     def _run_cn_request_access(self) -> bool:
         """Request TCC access to the Contacts entity. First `_run_cn_*` helper.
@@ -1465,7 +1486,10 @@ def _apply_update_fields(mutable: Any, fields: dict[str, Any]) -> None:
 
 
 def _serialize_contact(
-    contact: Any, CNLabeledValue: Any, include_niche: bool = False
+    contact: Any,
+    CNLabeledValue: Any,
+    include_niche: bool = False,
+    include_photo: bool = False,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "id": str(contact.identifier()),
@@ -1521,6 +1545,15 @@ def _serialize_contact(
             CNLabeledValue,
             _serialize_im_address,
         )
+    if include_photo:
+        if bool(contact.imageDataAvailable()):
+            raw = contact.imageData()
+            out["photo"] = {
+                "available": True,
+                "image_data": bytes(raw) if raw else b"",
+            }
+        else:
+            out["photo"] = {"available": False, "image_data": b""}
     return out
 
 

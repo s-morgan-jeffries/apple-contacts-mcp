@@ -174,8 +174,11 @@ Two specific holes in the framework that AppleScript fills:
 
 AppleScript reads/writes notes without entitlement. Implemented in
 [`contacts_connector.py`](../../../src/apple_contacts_mcp/contacts_connector.py)
-as `_run_applescript_read_note(identifier)` and `_run_applescript_write_note(identifier, note)`,
-exposed as the `read_note` and `write_note` MCP tools (v0.2.0, #19).
+as `_run_applescript_read_note(identifier)` and `_run_applescript_write_note(identifier, note)`.
+Exposed via `get_contact(identifier, include_note=True)` (read) and
+`update_contact(identifier, note=...)` (write) — consolidated in v0.5.0 (#98)
+from the previously-standalone `read_note` / `write_note` tools that shipped
+in v0.2.0 (#19).
 
 **Identifier format** — empirically verified during #19: AppleScript's
 `id of person` returns the **full `<UUID>:ABPerson` form**, identical to CN's

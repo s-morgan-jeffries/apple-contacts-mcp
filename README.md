@@ -8,13 +8,11 @@ A Model Context Protocol server for Apple Contacts on macOS.
 
 - `check_authorization` — TCC status pre-flight.
 - `list_contacts` — paged read.
-- `get_contact` — full P1 fetch by identifier.
+- `get_contact` — full P1 fetch by identifier. Opt-in flags: `include_niche` (dates / social_profiles / relations / instant_messages), `include_photo` (base64 + format), `include_note` (AppleScript fallback).
 - `search_contacts` — predicate by name, phone, email, or organization.
 - `create_contact` — write via `CNSaveRequest`.
-- `update_contact` — partial-field update.
+- `update_contact` — partial-field update. Photo and note are first-class fields here: pass `photo=<base64>` or `note=<str>`; pass `""` to clear; multi-field updates mixing CN-backed fields with note surface `partial_success` on the AppleScript half failing.
 - `delete_contact` — out-of-band confirmation via FastMCP elicitation outside test mode; refuses gracefully on clients without elicit support.
-- `read_note` / `write_note` — note field via AppleScript fallback (entitlement-gated in CN).
-- `read_photo` / `write_photo` — contact photo as base64-encoded bytes; read returns the detected format (JPEG/PNG/HEIC/GIF).
 - `list_groups` / `get_contacts_in_group` — group read.
 - `add_contact_to_group` / `remove_contact_from_group` — group membership.
 - `create_group` / `rename_group` / `delete_group` — group CRUD. `delete_group` uses the same elicitation-confirmation flow as `delete_contact`.

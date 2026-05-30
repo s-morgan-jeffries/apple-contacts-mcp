@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **Photo and note I/O consolidated into `get_contact` / `update_contact`.** The four field-specific tools `read_photo`, `write_photo`, `read_note`, `write_note` are **removed**. They violated the api-design skill's "field of a resource → parameter, not a separate tool" decision tree (an anti-pattern called out explicitly in `.claude/skills/api-design/SKILL.md`). Migration:
+
+  | Old call | New call |
+  |---|---|
+  | `read_photo(identifier)` | `get_contact(identifier, include_photo=True)` — adds `contact.photo = {image_data, format, size_bytes}` or `null`. |
+  | `write_photo(identifier, image_data)` | `update_contact(identifier, photo=<base64>)`. `photo=""` clears. |
+  | `read_note(identifier)` | `get_contact(identifier, include_note=True)` — adds `contact.note = "<string>"`. |
+  | `write_note(identifier, note)` | `update_contact(identifier, note=<string>)`. `note=""` clears. |
+
+  Tool count drops 21 → 17. The four connector-side helpers (`_run_cn_read_photo`, `_run_cn_write_photo`, `_run_applescript_read_note`, `_run_applescript_write_note`) are unchanged — they're now called from the consolidated tool sites. No backwards-compat shims; v0.4.0 had no external users (closes #98).
+
+### Added
+
+- **New `partial_success` error_type.** Surfaces from `update_contact` when mixed CN-backed + note writes produce a split-state failure (CN persisted, AppleScript note failed — or any combination), and from `get_contact` when `include_note=True` fails after the CN fetch succeeded. Response includes `writes_landed`, `writes_failed`, `identifier`, and (for reads) the partial `contact` payload. Caller should verify state via `get_contact` before retrying. Documented in TOOLS.md error appendix.
+- **`get_contact` opt-in flags `include_photo` and `include_note`.** Mirror the existing `include_niche` pattern. Photo data appears as `contact.photo = {image_data, format, size_bytes}` (or `null` when absent); note appears as `contact.note`. Both add measurable cost — `include_note` spawns an AppleScript subprocess; `include_photo` can return megabytes of base64.
+- **`update_contact` parameters `photo` and `note`.** Follow the same value-based clearing semantics as the existing string fields: `None` = don't touch, `""` = clear, value = set. Write order is CN fields → photo → note; failures after the first successful write surface as `partial_success`.
+
 ## [0.4.0] - 2026-05-28
 
 ### Security

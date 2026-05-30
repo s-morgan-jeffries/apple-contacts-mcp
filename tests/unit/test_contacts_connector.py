@@ -753,6 +753,11 @@ def _install_fake_contacts_for_unified(
         "CNContactSocialProfilesKey",
         "CNContactRelationsKey",
         "CNContactInstantMessageAddressesKey",
+        # Photo keys (only consulted when include_photo=True; same
+        # rationale — provide unconditionally so the conditional import
+        # inside _run_cn_unified_contact resolves).
+        "CNContactImageDataKey",
+        "CNContactImageDataAvailableKey",
     ):
         setattr(fake_module, k, k)
 
@@ -1014,6 +1019,70 @@ def test_unified_contact_includes_niche_keys_when_requested(
     assert "CNContactSocialProfilesKey" in fetched_keys
     assert "CNContactRelationsKey" in fetched_keys
     assert "CNContactInstantMessageAddressesKey" in fetched_keys
+
+
+def test_unified_contact_omits_photo_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """include_photo=False (default) → no `photo` key on the response, and
+    the photo CN keys aren't requested."""
+    contact = _make_full_contact()
+    contact.imageDataAvailable.return_value = True
+    contact.imageData.return_value = b"\xff\xd8\xffsome-bytes"
+    store = _install_fake_contacts_for_unified(monkeypatch, contact=contact)
+    connector = ContactsConnector()
+
+    result = connector._run_cn_unified_contact("ABCD")
+
+    assert result is not None
+    assert "photo" not in result
+    args, _ = store.unifiedContactWithIdentifier_keysToFetch_error_.call_args
+    fetched_keys = args[1]
+    assert "CNContactImageDataKey" not in fetched_keys
+
+
+def test_unified_contact_include_photo_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """include_photo=True with imageDataAvailable() True returns raw bytes
+    in the connector layer; the server tool layer is what base64-encodes."""
+    contact = _make_full_contact()
+    contact.imageDataAvailable.return_value = True
+    contact.imageData.return_value = b"\xff\xd8\xff\xe0\x00\x10\x00\x00"
+    store = _install_fake_contacts_for_unified(monkeypatch, contact=contact)
+    connector = ContactsConnector()
+
+    result = connector._run_cn_unified_contact("ABCD", include_photo=True)
+
+    assert result is not None
+    assert result["photo"] == {
+        "available": True,
+        "image_data": b"\xff\xd8\xff\xe0\x00\x10\x00\x00",
+    }
+    args, _ = store.unifiedContactWithIdentifier_keysToFetch_error_.call_args
+    fetched_keys = args[1]
+    assert "CNContactImageDataKey" in fetched_keys
+    assert "CNContactImageDataAvailableKey" in fetched_keys
+
+
+def test_unified_contact_include_photo_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """include_photo=True on a contact without a photo returns
+    {available: False, image_data: b''} — imageData() is NOT called
+    (the gap-analysis photo-data guard)."""
+    contact = _make_full_contact()
+    contact.imageDataAvailable.return_value = False
+    contact.imageData.side_effect = AssertionError(
+        "imageData() must not be called when imageDataAvailable() is False"
+    )
+    _install_fake_contacts_for_unified(monkeypatch, contact=contact)
+    connector = ContactsConnector()
+
+    result = connector._run_cn_unified_contact("ABCD", include_photo=True)
+
+    assert result is not None
+    assert result["photo"] == {"available": False, "image_data": b""}
 
 
 # ---------------------------------------------------------------------------
