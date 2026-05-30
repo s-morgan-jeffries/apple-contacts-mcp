@@ -3,7 +3,7 @@
 Reference for every MCP tool the apple-contacts-mcp server exposes.
 
 **Version:** v0.4.0 (tracks the package version)
-**Tools:** 21
+**Tools:** 17
 
 The source-of-truth for tool behavior is the docstrings in
 [src/apple_contacts_mcp/server.py](../../src/apple_contacts_mcp/server.py)
@@ -134,11 +134,14 @@ Error responses follow the [common error envelope](#error-types):
 
 ### get_contact
 
-Fetch a single contact by its CN identifier with all P1 fields.
+Fetch a single contact by its CN identifier with all P1 fields, plus optional photo and note via opt-in flags.
 
 ```python
 def get_contact(
-    identifier: str, include_niche: bool = False
+    identifier: str,
+    include_niche: bool = False,
+    include_photo: bool = False,
+    include_note: bool = False,
 ) -> dict[str, Any]
 ```
 
@@ -148,6 +151,8 @@ def get_contact(
 |---|---|---|---|
 | `identifier` | str | — | The contact's CN identifier (UUID-shaped string from `list_contacts` or `search_contacts`). Required, non-empty. |
 | `include_niche` | bool | False | When True, also fetches the P3 niche families (`dates`, `social_profiles`, `relations`, `instant_messages`). Off by default — most contacts won't have these populated and including them grows responses. |
+| `include_photo` | bool | False | When True, also fetches the contact's photo. Adds a `photo` key shaped `{image_data, format, size_bytes}` when present, or `photo: null` when the contact has no photo. Off by default — photo bytes can be large. |
+| `include_note` | bool | False | When True, also fetches the contact's note field via the AppleScript fallback (the CN note key is entitlement-gated). Adds a `note` string (`""` if no note set). Off by default — the AppleScript subprocess adds noticeable latency. |
 
 **Returns:**
 
@@ -206,6 +211,32 @@ With `include_niche=True`, the contact dict also contains four additional labele
 
 When `include_niche=False` (the default), these four keys are **absent** from the response — not `null`. Callers detect presence via `"dates" in contact`.
 
+With `include_photo=True`:
+
+```jsonc
+{
+  "photo": {
+    "image_data": "<base64>",
+    "format": "jpeg",
+    "size_bytes": 12345
+  }
+}
+```
+
+Or `"photo": null` when the contact has no photo. With `include_note=True`, the contact dict carries `"note": "<string>"` (`""` for unset).
+
+When a note read fails after the CN fetch succeeded (rare — usually a deletion race or identifier-form mismatch with AppleScript):
+
+```jsonc
+{
+  "success": false,
+  "error_type": "partial_success",
+  "identifier": "ABCD",
+  "error": "CN fields fetched but note read failed: …",
+  "contact": { /* CN-side data still surfaced */ }
+}
+```
+
 When the identifier doesn't resolve:
 
 ```jsonc
@@ -216,13 +247,15 @@ When the identifier doesn't resolve:
 }
 ```
 
-**Error types:** `validation_error`, `not_found`, `authorization_denied`, `unknown`.
+**Error types:** `validation_error`, `not_found`, `authorization_denied`, `partial_success`, `unknown`.
 
 **Notes:**
 - All single-valued string fields are always present, possibly `""`.
 - All four labeled-value families (`phones`, `emails`, `urls`, `postal_addresses`) are always present, possibly `[]`.
 - Each labeled-value entry carries **both** `label_raw` (the Apple token like `_$!<Mobile>!$_`) and `label` (the human-readable string from `CNLabeledValue.localizedStringForLabel:`). Custom labels round-trip as themselves on both keys.
 - `birthday` is `null` when the contact has no birthday set; otherwise a dict with whichever of `year` / `month` / `day` are defined. Apple lets users set a birthday without a year — in that case the dict is `{"month": 5, "day": 15}` with no `year` key.
+- `include_note=True` spawns an AppleScript subprocess — non-trivial latency. Pair it with `include_photo` / `include_niche` only when you actually need everything in one call.
+- `format` (photo) is one of `jpeg | png | heic | gif | unknown` from magic-byte sniffing on the raw bytes.
 
 ---
 
@@ -370,7 +403,7 @@ Both id-echo keys follow the [response-shape convention](#format) — always pre
 
 ### update_contact
 
-Update an existing contact by identifier with partial-field semantics.
+Update an existing contact by identifier with partial-field semantics. Photo and note are first-class fields here as of v0.5.0 (replacing the removed `write_photo` / `write_note` tools).
 
 ```python
 def update_contact(
@@ -393,6 +426,8 @@ def update_contact(
     social_profiles: list[dict[str, str]] | None = None,
     relations: list[dict[str, str]] | None = None,
     instant_messages: list[dict[str, str]] | None = None,
+    photo: str | None = None,
+    note: str | None = None,
     group_identifier: str | None = None,
 ) -> dict[str, Any]
 ```
@@ -412,6 +447,12 @@ def update_contact(
 | `dates=None` / `social_profiles=None` / `relations=None` / `instant_messages=None` | Don't touch. |
 | `dates=[]` (or any niche field `=[]`) | Replace with empty list (clear all). |
 | `dates=[{...}]` / etc. | **Replace** all entries (REST-PUT semantics). Per-entry shape matches `create_contact`. |
+| `photo=None` (default) | Don't touch. |
+| `photo=""` | Clear the photo. |
+| `photo="<base64>"` | Replace with the decoded bytes. Apple decides what's acceptable. |
+| `note=None` (default) | Don't touch. |
+| `note=""` | Clear the note. |
+| `note="<string>"` | Replace. Written via AppleScript (CN note is entitlement-gated). |
 
 `identifier` and `group_identifier` follow the same semantics as in `create_contact`. At least one mutating field must be supplied (besides `identifier` and `group_identifier`).
 
@@ -423,15 +464,29 @@ def update_contact(
 
 Use `get_contact(identifier)` to read back the updated record.
 
-**Error types:** `validation_error`, `authorization_denied`, `safety_violation`, `not_found`, `unknown`.
+When the CN-backed write succeeds but a subsequent photo or note write fails:
 
-`not_found` here means the `identifier` doesn't match any contact.
+```jsonc
+{
+  "success": false,
+  "error_type": "partial_success",
+  "identifier": "ABCD-…",
+  "error": "update_contact partial success: fields wrote successfully but note failed: …",
+  "writes_landed": ["fields"],
+  "writes_failed": ["note"]
+}
+```
+
+**Error types:** `validation_error`, `authorization_denied`, `safety_violation`, `not_found`, `partial_success`, `unknown`.
+
+`not_found` here means the `identifier` doesn't match any contact. `partial_success` means at least one but not all of the requested writes (CN fields, photo, note) persisted — caller should verify state via `get_contact` before retrying.
 
 **Notes:**
 - The `None`-vs-`""` asymmetry with `create_contact` is intentional: update needs to distinguish "not supplied" from "explicitly clear", whereas create has nothing to overwrite.
 - **Clearing birthday entirely is not supported in v0.1.0.** Use Apple's Contacts.app to clear it, or pass a `birthday=` value to overwrite the components. A clear-via-sentinel API may land in v0.2.0+.
 - `group_identifier` is consumed only by the test-mode safety gate — the underlying connector ignores it. Group membership changes go through `add_contact_to_group` / `remove_contact_from_group`.
 - Labeled-value `label` follows the same three-form contract as `create_contact`: human form (`"mobile"`, `"home fax"`, …), Apple token (`"_$!<Mobile>!$_"`), or custom string. See `create_contact` notes and [`docs/research/label-translation-decision.md`](../research/label-translation-decision.md).
+- **Write order is CN fields → photo → note.** The photo path uses CN; the note path uses an AppleScript subprocess (slower; non-atomic with the CN write). For atomicity, write photo or note alone. Failures after the first successful write surface as `partial_success`.
 
 ---
 
@@ -473,76 +528,6 @@ async def delete_contact(
 ---
 
 ## Phase 2 Tools (v0.2.0)
-
-### read_note
-
-Read a contact's note via AppleScript.
-
-```python
-def read_note(identifier: str) -> dict[str, Any]
-```
-
-**Parameters:**
-
-| Name | Type | Default | Description |
-|---|---|---|---|
-| `identifier` | str | — | Full CN identifier (e.g. `ABCD-1234-…:ABPerson`). Must be the suffixed form returned by other tools — bare UUIDs do not match. |
-
-**Returns:**
-
-```jsonc
-{
-  "success": true,
-  "identifier": "ABCD-1234-…:ABPerson",
-  "note": "free-form text the user wrote\non multiple lines"
-}
-```
-
-`note == ""` indicates the contact exists but has no note set.
-
-**Error types:** `validation_error`, `authorization_denied`, `not_found`, `unknown`.
-
-**Notes:**
-- **Backed by AppleScript via `osascript`, not Contacts.framework.** The `note` field requires the `com.apple.developer.contacts.notes` entitlement that Apple grants only to App Store apps; we're unbundled, so we route through Contacts.app's AppleScript scripting bridge instead.
-- Pass the identifier verbatim. AppleScript's `id of person` includes the `:ABPerson` suffix — stripping it produces an `Invalid index` error that this tool maps to `not_found`.
-- TCC: gated by `_require_contacts_authorization()` (Contacts privacy permission). On macOS, AppleScript→Contacts.app additionally needs Automation permission, which the OS prompts for on the first call.
-
----
-
-### write_note
-
-Write a contact's note via AppleScript. `note=""` clears the note.
-
-```python
-def write_note(
-    identifier: str,
-    note: str,
-    group_identifier: str | None = None,
-) -> dict[str, Any]
-```
-
-**Parameters:**
-
-| Name | Type | Default | Description |
-|---|---|---|---|
-| `identifier` | str | — | Full CN identifier (must include `:ABPerson` suffix; see `read_note`). |
-| `note` | str | — | New note text. Empty string clears the note. |
-| `group_identifier` | str \| None | None | Required in test mode for the safety gate; ignored otherwise. |
-
-**Returns:**
-
-```jsonc
-{"success": true, "identifier": "ABCD-1234-…:ABPerson"}
-```
-
-**Error types:** `validation_error`, `safety_violation`, `authorization_denied`, `not_found`, `unknown`.
-
-**Notes:**
-- **Destructive: replaces the note in full** (no append/diff semantics). Use `read_note` first if you need to preserve existing content.
-- Same AppleScript-routing caveats as `read_note`. The connector also issues a `save` after the write — without it, edits sit only in Contacts.app's in-memory state.
-- Test-mode gate is the same shape as `update_contact` (`check_test_mode_safety`, *not* `require_test_mode_for`): outside test mode the call runs freely; in test mode the contact must belong to `CONTACTS_TEST_GROUP`.
-
----
 
 ### list_groups
 
@@ -810,84 +795,6 @@ def list_containers() -> dict[str, Any]
 - Read-only; no test-mode gating.
 - Empirical basis for the multi-container write path: [`docs/research/multi-container-write-decision.md`](../research/multi-container-write-decision.md).
 
-### read_photo
-
-Read a contact's photo. Returns base64-encoded bytes plus the detected image format.
-
-```python
-def read_photo(identifier: str) -> dict[str, Any]
-```
-
-**Parameters:**
-
-| Name | Type | Default | Description |
-|---|---|---|---|
-| `identifier` | str | — | The contact's CN identifier. |
-
-**Returns:**
-
-```jsonc
-// Contact exists, photo set
-{
-  "success": true,
-  "identifier": "ABCD-…",
-  "image_data": "<base64-encoded bytes>",
-  "format": "jpeg",
-  "size_bytes": 12345
-}
-
-// Contact exists, no photo set — distinct from not_found
-{
-  "success": true,
-  "identifier": "ABCD-…",
-  "image_data": null,
-  "format": null,
-  "size_bytes": 0
-}
-```
-
-**Error types:** `validation_error`, `authorization_denied`, `not_found`, `unknown`.
-
-**Notes:**
-- **Binary transport:** `image_data` is base64-encoded (`base64.b64encode(bytes).decode("ascii")`). Callers decode via `base64.b64decode(image_data)` to recover the raw bytes.
-- **Format detection** runs magic-byte detection on the raw bytes; the result is one of `"jpeg"`, `"png"`, `"gif"`, `"heic"`, or `"unknown"`. The HEIC bucket covers the HEIF-family ISOBMFF brands Apple emits (heic, heix, heif, hevc, hevx, mif1, msf1).
-- **The no-photo case is a SUCCESS**, not `not_found`. Callers must check `image_data is not None` to detect "has photo," not key presence.
-- Per the gap analysis gotcha, the connector always checks `imageDataAvailable()` before calling `imageData()` — directly reading on a photo-less contact misbehaves empirically.
-
-### write_photo
-
-Set or clear a contact's photo.
-
-```python
-def write_photo(
-    identifier: str,
-    image_data: str | None,
-    group_identifier: str | None = None,
-) -> dict[str, Any]
-```
-
-**Parameters:**
-
-| Name | Type | Default | Description |
-|---|---|---|---|
-| `identifier` | str | — | The contact's CN identifier. |
-| `image_data` | str \| None | — | Base64-encoded image bytes (JPEG/PNG/HEIC supported by Apple). `null` clears the existing photo. |
-| `group_identifier` | str \| None | None | Test-mode safety assertion. Required in test mode (must match `CONTACTS_TEST_GROUP`); ignored otherwise. |
-
-**Returns:**
-
-```jsonc
-{"success": true, "identifier": "ABCD-…"}
-```
-
-**Error types:** `validation_error`, `authorization_denied`, `safety_violation`, `not_found`, `unknown`.
-
-**Notes:**
-- **Destructive (test-mode gated).** Same posture as `update_contact`.
-- **Binary transport:** caller supplies base64-encoded text via `base64.b64encode(bytes).decode("ascii")`. The tool decodes via `base64.b64decode(..., validate=True)` and surfaces decode errors as `validation_error`.
-- **Permissive on format:** the tool does not pre-validate that the bytes are a recognized image format. Apple is the authority — if it rejects the bytes, `CNSaveRequest` fails and we surface `unknown`.
-- **`image_data=null` clears the photo** — the standard way to remove a contact's existing image. The clear path is atomic just like a write.
-
 ### create_group
 
 Create a new contact group.
@@ -1021,6 +928,7 @@ Common envelope:
 | `user_declined` | The user explicitly declined or cancelled an elicitation confirmation prompt (`delete_contact`, `delete_group`). The destructive op was not performed. | — |
 | `rate_limited` | A tool exceeded its tier's sliding-window limit. Every `@mcp.tool()` is gated via `check_rate_limit(<operation_name>)` immediately after input validation and before the auth check, so a rate-limited caller doesn't trigger a TCC prompt. Tiers and limits live in `security.py` (`TIER_LIMITS`, `OPERATION_TIERS`). Callers retry after the window passes (60 s currently). The error message includes the operation, limit, and tier name. | — |
 | `not_found` | A referenced CN object (contact identifier or `group_identifier`) doesn't exist in the unified store. | — |
+| `partial_success` | Some but not all writes in a multi-write operation succeeded, or a read returned the primary payload but a secondary fetch failed. Emitted by `update_contact` when mixing `note` (AppleScript) or `photo` with CN-backed fields, and by `get_contact` when `include_note=True` fails after the CN fetch succeeded. The error message names which writes / fetches landed and which didn't. For writes: caller should verify state via `get_contact` before retrying. The successful CN data (where applicable) is still surfaced under `contact`. | `writes_landed`, `writes_failed`, `identifier`, `contact` |
 | `unknown` | Anything else — usually a CN save failure or an unexpected PyObjC error. The `error` field has the underlying message. | — |
 
 The `success: true` envelope is tool-specific (see each tool's Returns

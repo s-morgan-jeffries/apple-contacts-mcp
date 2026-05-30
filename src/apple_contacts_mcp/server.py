@@ -269,13 +269,17 @@ def list_contacts(offset: int = 0, limit: int = 50) -> dict[str, Any]:
 
 @mcp.tool()
 def get_contact(
-    identifier: str, include_niche: bool = False
+    identifier: str,
+    include_niche: bool = False,
+    include_photo: bool = False,
+    include_note: bool = False,
 ) -> dict[str, Any]:
     """Fetch a single contact by its CN identifier with all P1 fields.
 
     Get an identifier from ``list_contacts`` or ``search_contacts``, then
     call this for the full record (name parts, organization, phones,
-    emails, postal addresses, urls, birthday).
+    emails, postal addresses, urls, birthday). Use the opt-in flags to
+    pull additional families on the same call.
 
     Args:
         identifier: The contact's CN identifier (UUID-shaped string).
@@ -283,19 +287,36 @@ def get_contact(
             (``dates``, ``social_profiles``, ``relations``,
             ``instant_messages``). Off by default — most contacts won't
             have these populated and including them grows responses.
+        include_photo: When True, also fetch the contact's photo as
+            base64-encoded bytes. Result contains a ``photo`` key shaped
+            ``{"image_data": "<base64>", "format": "jpeg|png|heic|gif",
+            "size_bytes": <int>}`` when present, or ``"photo": null``
+            when the contact has no photo. Off by default — photo bytes
+            can be large.
+        include_note: When True, also fetch the contact's note field
+            via the AppleScript fallback (the note field is
+            entitlement-gated in Contacts.framework). Adds a ``"note":
+            "<string>"`` key (empty string when no note set). Off by
+            default — the AppleScript subprocess adds noticeable latency.
 
     Returns:
         On success: ``{"success": True, "contact": {...full P1 fields...}}``.
         When ``include_niche=True``, the contact dict also contains
         ``dates`` / ``social_profiles`` / ``relations`` / ``instant_messages``
         keys (possibly empty lists). When False (default), those keys are
-        absent.
+        absent. When ``include_photo=True``, the contact dict contains
+        ``photo`` (or ``photo: null``). When ``include_note=True``, it
+        contains ``note``.
         On missing identifier (no such contact): ``{"success": False,
         "error_type": "not_found", "error": ...}``.
         On bad input (empty string): ``{"success": False, "error_type":
         "validation_error", "error": ...}``.
         On TCC denial: same shape as ``list_contacts`` (status,
         remediation).
+        On note-read failure after CN fetch succeeded: ``{"success":
+        False, "error_type": "partial_success", "contact": {...CN
+        data...}, "error": "...", "identifier": ...}`` — the caller
+        still gets the CN-side data and is told which sub-fetch failed.
         On unexpected failure: ``{"success": False, "error_type":
         "unknown", "error": ...}``.
 
@@ -321,7 +342,9 @@ def get_contact(
 
     try:
         contact = connector._run_cn_unified_contact(
-            identifier, include_niche=include_niche
+            identifier,
+            include_niche=include_niche,
+            include_photo=include_photo,
         )
     except Exception as exc:
         logger.error("get_contact fetch failed: %s", exc)
@@ -344,11 +367,57 @@ def get_contact(
             "error_type": "not_found",
         }
 
-    operation_logger.log_operation(
-        "get_contact",
-        {"identifier": identifier, "include_niche": include_niche},
-        "success",
-    )
+    audit_params: dict[str, Any] = {
+        "identifier": identifier,
+        "include_niche": include_niche,
+        "include_photo": include_photo,
+        "include_note": include_note,
+    }
+
+    if include_photo:
+        raw_photo = contact.pop("photo", None)
+        if raw_photo is not None and raw_photo.get("available"):
+            raw_bytes = raw_photo["image_data"]
+            photo_format = detect_image_format(raw_bytes)
+            contact["photo"] = {
+                "image_data": base64.b64encode(raw_bytes).decode("ascii"),
+                "format": photo_format,
+                "size_bytes": len(raw_bytes),
+            }
+            audit_params["photo_size_bytes"] = len(raw_bytes)
+            audit_params["photo_format"] = photo_format
+        else:
+            contact["photo"] = None
+            audit_params["photo_size_bytes"] = 0
+
+    if include_note:
+        try:
+            note = connector._run_applescript_read_note(identifier)
+        except ContactsNotFoundError as exc:
+            # CN saw the contact but AppleScript can't find it. Rare race
+            # (deletion between fetches) or identifier-form mismatch.
+            return {
+                "success": False,
+                "error_type": "partial_success",
+                "error": (
+                    f"CN fields fetched but note read failed: {exc}"
+                ),
+                "identifier": identifier,
+                "contact": contact,
+            }
+        except Exception as exc:
+            logger.error("get_contact note read failed: %s", exc)
+            return {
+                "success": False,
+                "error_type": "partial_success",
+                "error": f"CN fields fetched but note read failed: {exc}",
+                "identifier": identifier,
+                "contact": contact,
+            }
+        contact["note"] = note
+        audit_params["note_length"] = len(note)
+
+    operation_logger.log_operation("get_contact", audit_params, "success")
     return {"success": True, "contact": contact}
 
 
@@ -973,13 +1042,18 @@ def create_contact(
 
 
 def _validate_update_contact_input(
-    identifier: str, fields: dict[str, Any]
+    identifier: str,
+    fields: dict[str, Any],
+    photo: str | None = None,
+    note: str | None = None,
 ) -> dict[str, Any] | None:
     """Validate update_contact's parsed input. Returns None if OK, error
-    dict otherwise."""
+    dict otherwise. ``photo`` and ``note`` count toward the
+    "at least one field" requirement even though they're handled
+    outside the ``fields`` dict at the call site."""
     if not identifier or not identifier.strip():
         return _validation_error("identifier must be a non-empty string")
-    if len(fields) == 0:
+    if len(fields) == 0 and photo is None and note is None:
         return _validation_error(
             "At least one field must be supplied to update."
         )
@@ -1007,6 +1081,8 @@ def update_contact(
     social_profiles: list[dict[str, str]] | None = None,
     relations: list[dict[str, str]] | None = None,
     instant_messages: list[dict[str, str]] | None = None,
+    photo: str | None = None,
+    note: str | None = None,
     group_identifier: str | None = None,
 ) -> dict[str, Any]:
     """Update an existing contact by identifier with partial-field semantics.
@@ -1026,6 +1102,15 @@ def update_contact(
     Args:
         identifier: The contact's CN identifier.
         ...all P1 fields (None = don't touch; "" = clear)...
+        photo: Base64-encoded image bytes. ``None`` = don't touch;
+            ``""`` = clear the photo; otherwise replace with these
+            bytes. Format is autodetected on read but not validated
+            on write (Apple decides what's acceptable).
+        note: Note text. ``None`` = don't touch; ``""`` = clear the
+            note; otherwise replace. Written via the AppleScript
+            fallback (CN note is entitlement-gated); see Notes below
+            for the partial-success failure mode when mixed with
+            CN-backed fields.
         group_identifier: Test-mode safety assertion. Required in test
             mode. Ignored otherwise.
 
@@ -1039,8 +1124,21 @@ def update_contact(
         "safety_violation", ...}``.
         On contact not found: ``{"success": False, "error_type":
         "not_found", ...}``.
+        On partial success (e.g., CN fields wrote but the AppleScript
+        note write failed afterward): ``{"success": False,
+        "error_type": "partial_success", "identifier": ..., "error":
+        "<which writes landed, which failed>"}``. The CN write is
+        already persisted — caller should verify state via
+        ``get_contact`` before retrying. Use ``photo`` or ``note`` alone
+        for atomic single-field writes.
         On CN save failure: ``{"success": False, "error_type":
         "unknown", ...}``.
+
+    Notes:
+        Write order is CN-backed fields, then photo, then note. The
+        photo path uses CN; the note path uses an AppleScript
+        subprocess (slower; non-atomic with the CN write). Failures
+        after the first success surface as ``partial_success``.
     """
     fields: dict[str, Any] = {}
     for key, value in (
@@ -1066,9 +1164,28 @@ def update_contact(
         if value is not None:
             fields[key] = value
 
-    validation_err = _validate_update_contact_input(identifier, fields)
+    validation_err = _validate_update_contact_input(
+        identifier, fields, photo=photo, note=note
+    )
     if validation_err is not None:
         return validation_err
+
+    # Decode photo if supplied. "" = clear (decoded=None); base64 → bytes.
+    decoded_photo: bytes | None
+    if photo is None:
+        decoded_photo = None
+        photo_requested = False
+    elif photo == "":
+        decoded_photo = None
+        photo_requested = True
+    else:
+        try:
+            decoded_photo = base64.b64decode(photo, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            return _validation_error(
+                f"photo is not valid base64: {exc}"
+            )
+        photo_requested = True
 
     rate_err = check_rate_limit("update_contact")
     if rate_err is not None:
@@ -1084,36 +1201,117 @@ def update_contact(
     if safety_err is not None:
         return safety_err
 
-    try:
-        connector._run_cn_update_contact(identifier=identifier, fields=fields)
-    except ContactsNotFoundError as exc:
-        return {
-            "success": False,
-            "error": str(exc),
-            "error_type": "not_found",
-        }
-    except Exception as exc:
-        logger.error("update_contact failed: %s", exc)
-        return {
-            "success": False,
-            "error": f"Update failed: {exc}",
-            "error_type": "unknown",
-        }
+    writes_landed: list[str] = []
+
+    if fields:
+        err = _run_update_step(
+            lambda: connector._run_cn_update_contact(
+                identifier=identifier, fields=fields
+            ),
+            label="fields",
+            identifier=identifier,
+            writes_landed=writes_landed,
+            unknown_msg="Update failed",
+        )
+        if err is not None:
+            return err
+
+    if photo_requested:
+        err = _run_update_step(
+            lambda: connector._run_cn_write_photo(
+                identifier=identifier, image_data=decoded_photo
+            ),
+            label="photo",
+            identifier=identifier,
+            writes_landed=writes_landed,
+            unknown_msg="Photo write failed",
+        )
+        if err is not None:
+            return err
+
+    if note is not None:
+        err = _run_update_step(
+            lambda: connector._run_applescript_write_note(identifier, note),
+            label="note",
+            identifier=identifier,
+            writes_landed=writes_landed,
+            unknown_msg="Note write failed",
+        )
+        if err is not None:
+            return err
 
     auth_revoked = _verify_authorization_still_granted()
     if auth_revoked is not None:
         return auth_revoked
 
-    operation_logger.log_operation(
-        "update_contact",
-        {
-            "identifier": identifier,
-            "group_identifier": group_identifier,
-            "fields_updated": sorted(fields.keys()),
-        },
-        "success",
-    )
+    audit_params: dict[str, Any] = {
+        "identifier": identifier,
+        "group_identifier": group_identifier,
+        "fields_updated": sorted(fields.keys()),
+    }
+    if photo_requested:
+        audit_params["photo_size_bytes"] = (
+            len(decoded_photo) if decoded_photo is not None else 0
+        )
+        audit_params["clearing_photo"] = decoded_photo is None
+    if note is not None:
+        audit_params["note_length"] = len(note)
+        audit_params["clearing_note"] = note == ""
+
+    operation_logger.log_operation("update_contact", audit_params, "success")
     return {"success": True, "identifier": identifier}
+
+
+def _run_update_step(
+    write_fn: Any,
+    *,
+    label: str,
+    identifier: str,
+    writes_landed: list[str],
+    unknown_msg: str,
+) -> dict[str, Any] | None:
+    """Run one sub-step of update_contact. Returns None on success (and
+    appends ``label`` to ``writes_landed``), or an error dict on failure.
+
+    Failure shape depends on whether prior steps already landed:
+    - Empty ``writes_landed`` → atomic failure (``not_found`` or ``unknown``).
+    - Non-empty → ``partial_success`` naming what landed and what failed.
+    """
+    try:
+        write_fn()
+    except ContactsNotFoundError as exc:
+        if writes_landed:
+            return _partial_success(identifier, writes_landed, label, str(exc))
+        return {"success": False, "error": str(exc), "error_type": "not_found"}
+    except Exception as exc:
+        logger.error("update_contact %s write failed: %s", label, exc)
+        if writes_landed:
+            return _partial_success(identifier, writes_landed, label, str(exc))
+        return {
+            "success": False,
+            "error": f"{unknown_msg}: {exc}",
+            "error_type": "unknown",
+        }
+    writes_landed.append(label)
+    return None
+
+
+def _partial_success(
+    identifier: str,
+    landed: list[str], failed: str, reason: str
+) -> dict[str, Any]:
+    return {
+        "success": False,
+        "error_type": "partial_success",
+        "identifier": identifier,
+        "error": (
+            f"update_contact partial success: "
+            f"{', '.join(landed)} wrote successfully but {failed} failed: {reason}. "
+            f"Verify state via get_contact before retrying."
+        ),
+        "writes_landed": list(landed),
+        "writes_failed": [failed],
+    }
 
 
 @mcp.tool()
@@ -1396,331 +1594,6 @@ def import_vcard(
         "count": len(identifiers),
         "group_id": group_identifier,
     }
-
-
-@mcp.tool()
-def read_note(identifier: str) -> dict[str, Any]:
-    """Read a contact's note via AppleScript.
-
-    The ``note`` field is entitlement-gated in ``Contacts.framework``
-    (only App Store apps with the ``com.apple.developer.contacts.notes``
-    entitlement can read it through the framework). We're unbundled, so
-    this tool routes through ``osascript`` against Contacts.app.
-
-    Args:
-        identifier: The contact's full CN identifier including the
-            ``:ABPerson`` suffix (e.g., ``"BD0B...:ABPerson"``). Bare UUIDs
-            are not accepted — AppleScript's ``id of person`` includes the
-            suffix and won't match without it.
-
-    Returns:
-        On success: ``{"success": True, "identifier": ..., "note": ...}``.
-        ``note == ""`` indicates the contact has no note set.
-        On bad input: ``{"success": False, "error_type":
-        "validation_error", ...}``.
-        On TCC denial: ``authorization_denied``.
-        On unknown identifier: ``not_found``.
-        On unexpected failure: ``unknown``.
-    """
-    if not identifier or not identifier.strip():
-        return _validation_error("identifier must be a non-empty string")
-
-    rate_err = check_rate_limit("read_note")
-    if rate_err is not None:
-        return rate_err
-
-    auth_err = _require_contacts_authorization()
-    if auth_err is not None:
-        return auth_err
-
-    try:
-        note = connector._run_applescript_read_note(identifier)
-    except ContactsNotFoundError as exc:
-        return {
-            "success": False,
-            "error": str(exc),
-            "error_type": "not_found",
-        }
-    except Exception as exc:
-        logger.error("read_note failed: %s", exc)
-        return {
-            "success": False,
-            "error": f"read_note failed: {exc}",
-            "error_type": "unknown",
-        }
-
-    operation_logger.log_operation(
-        "read_note",
-        {"identifier": identifier, "note_length": len(note)},
-        "success",
-    )
-    return {"success": True, "identifier": identifier, "note": note}
-
-
-@mcp.tool()
-def write_note(
-    identifier: str,
-    note: str,
-    group_identifier: str | None = None,
-) -> dict[str, Any]:
-    """Write a contact's note via AppleScript. ``note=""`` clears the note.
-
-    Destructive: overwrites any existing note in full (no append/diff
-    semantics). Test-mode gated like ``update_contact`` — when
-    ``CONTACTS_TEST_MODE=true``, the contact must belong to
-    ``CONTACTS_TEST_GROUP`` (caller asserts this via the
-    ``group_identifier`` argument).
-
-    Args:
-        identifier: The contact's CN identifier.
-        note: The new note text. Empty string clears the note.
-        group_identifier: Optional group name or CN identifier — required
-            in test mode for the safety gate.
-
-    Returns:
-        On success: ``{"success": True, "identifier": ...}``.
-        On bad input: ``validation_error``.
-        On TCC denial: ``authorization_denied``.
-        On test-mode mismatch: ``safety_violation``.
-        On unknown identifier: ``not_found``.
-        On unexpected failure: ``unknown``.
-    """
-    if not identifier or not identifier.strip():
-        return _validation_error("identifier must be a non-empty string")
-
-    rate_err = check_rate_limit("write_note")
-    if rate_err is not None:
-        return rate_err
-
-    auth_err = _require_contacts_authorization()
-    if auth_err is not None:
-        return auth_err
-
-    safety_err = check_test_mode_safety("write_note", group=group_identifier)
-    if safety_err is not None:
-        return safety_err
-
-    try:
-        connector._run_applescript_write_note(identifier, note)
-    except ContactsNotFoundError as exc:
-        return {
-            "success": False,
-            "error": str(exc),
-            "error_type": "not_found",
-        }
-    except Exception as exc:
-        logger.error("write_note failed: %s", exc)
-        return {
-            "success": False,
-            "error": f"write_note failed: {exc}",
-            "error_type": "unknown",
-        }
-
-    auth_revoked = _verify_authorization_still_granted()
-    if auth_revoked is not None:
-        return auth_revoked
-
-    operation_logger.log_operation(
-        "write_note",
-        {
-            "identifier": identifier,
-            "group_identifier": group_identifier,
-            "note_length": len(note),
-        },
-        "success",
-    )
-    return {"success": True, "identifier": identifier}
-
-
-@mcp.tool()
-def read_photo(identifier: str) -> dict[str, Any]:
-    """Read a contact's photo. Returns base64-encoded bytes + detected format.
-
-    The photo is transported as base64-encoded text — JSON-safe over the
-    MCP wire. Callers decode via ``base64.b64decode(image_data)``.
-
-    The contact-exists-but-no-photo case is a SUCCESS (``image_data:
-    null``, ``format: null``, ``size_bytes: 0``) — distinct from
-    ``not_found``, which means the identifier didn't match any contact.
-
-    Args:
-        identifier: The contact's CN identifier.
-
-    Returns:
-        On success (photo set): ``{"success": True, "identifier": ...,
-        "image_data": "<base64>", "format": "jpeg" | "png" | "heic" |
-        "gif" | "unknown", "size_bytes": <int>}``.
-        On success (no photo set): ``{"success": True, "identifier":
-        ..., "image_data": null, "format": null, "size_bytes": 0}``.
-        On bad input: ``validation_error``.
-        On TCC denial: ``authorization_denied``.
-        On unknown identifier: ``not_found``.
-        On unexpected failure: ``unknown``.
-    """
-    if not identifier or not identifier.strip():
-        return _validation_error("identifier must be a non-empty string")
-
-    rate_err = check_rate_limit("read_photo")
-    if rate_err is not None:
-        return rate_err
-
-    auth_err = _require_contacts_authorization()
-    if auth_err is not None:
-        return auth_err
-
-    try:
-        photo = connector._run_cn_read_photo(identifier)
-    except Exception as exc:
-        logger.error("read_photo failed: %s", exc)
-        return {
-            "success": False,
-            "error": f"read_photo failed: {exc}",
-            "error_type": "unknown",
-        }
-
-    if photo is None:
-        # `None` could be genuinely-not-found OR mid-call TCC revocation
-        # (unifiedContactWithIdentifier returns None for both). Issue #37.
-        auth_revoked = _verify_authorization_still_granted()
-        if auth_revoked is not None:
-            return auth_revoked
-        return {
-            "success": False,
-            "error": f"Contact not found: {identifier!r}",
-            "error_type": "not_found",
-        }
-
-    if not photo["available"]:
-        operation_logger.log_operation(
-            "read_photo",
-            {"identifier": identifier, "has_photo": False},
-            "success",
-        )
-        return {
-            "success": True,
-            "identifier": identifier,
-            "image_data": None,
-            "format": None,
-            "size_bytes": 0,
-        }
-
-    raw = photo["image_data"]
-    photo_format = detect_image_format(raw)
-    operation_logger.log_operation(
-        "read_photo",
-        {
-            "identifier": identifier,
-            "has_photo": True,
-            "size_bytes": len(raw),
-            "format": photo_format,
-        },
-        "success",
-    )
-    return {
-        "success": True,
-        "identifier": identifier,
-        "image_data": base64.b64encode(raw).decode("ascii"),
-        "format": photo_format,
-        "size_bytes": len(raw),
-    }
-
-
-@mcp.tool()
-def write_photo(
-    identifier: str,
-    image_data: str | None,
-    group_identifier: str | None = None,
-) -> dict[str, Any]:
-    """Set or clear a contact's photo.
-
-    ``image_data`` is **base64-encoded** input — JSON-safe transport for
-    binary. ``image_data=None`` clears the photo. Apple is the authority
-    on accepted formats; bytes that Apple rejects surface as ``unknown``
-    rather than ``validation_error``.
-
-    Destructive (test-mode gated): in test mode,
-    ``group_identifier`` must match ``CONTACTS_TEST_GROUP``.
-
-    Args:
-        identifier: The contact's CN identifier.
-        image_data: Base64-encoded image bytes (JPEG/PNG/HEIC). ``None``
-            clears the existing photo.
-        group_identifier: Test-mode safety assertion. Required in test
-            mode; ignored otherwise.
-
-    Returns:
-        On success: ``{"success": True, "identifier": identifier}``.
-        On bad input (empty identifier or bad base64): ``validation_error``.
-        On TCC denial: ``authorization_denied``.
-        On test-mode mismatch: ``safety_violation``.
-        On unknown identifier: ``not_found``.
-        On CN save failure: ``unknown``.
-    """
-    if not identifier or not identifier.strip():
-        return _validation_error("identifier must be a non-empty string")
-
-    decoded: bytes | None
-    if image_data is None:
-        decoded = None
-    else:
-        if not isinstance(image_data, str):
-            return _validation_error(
-                "image_data must be a base64-encoded string or null"
-            )
-        try:
-            decoded = base64.b64decode(image_data, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            return _validation_error(
-                f"image_data is not valid base64: {exc}"
-            )
-
-    rate_err = check_rate_limit("write_photo")
-    if rate_err is not None:
-        return rate_err
-
-    auth_err = _require_contacts_authorization()
-    if auth_err is not None:
-        return auth_err
-
-    safety_err = check_test_mode_safety(
-        "write_photo", group=group_identifier
-    )
-    if safety_err is not None:
-        return safety_err
-
-    try:
-        connector._run_cn_write_photo(
-            identifier=identifier, image_data=decoded
-        )
-    except ContactsNotFoundError as exc:
-        return {
-            "success": False,
-            "error": str(exc),
-            "error_type": "not_found",
-        }
-    except Exception as exc:
-        logger.error("write_photo failed: %s", exc)
-        return {
-            "success": False,
-            "error": f"write_photo failed: {exc}",
-            "error_type": "unknown",
-        }
-
-    auth_revoked = _verify_authorization_still_granted()
-    if auth_revoked is not None:
-        return auth_revoked
-
-    operation_logger.log_operation(
-        "write_photo",
-        {
-            "identifier": identifier,
-            "group_identifier": group_identifier,
-            "size_bytes": len(decoded) if decoded is not None else 0,
-            "clearing": decoded is None,
-        },
-        "success",
-    )
-    return {"success": True, "identifier": identifier}
 
 
 @mcp.tool()

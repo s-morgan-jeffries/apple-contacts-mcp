@@ -33,14 +33,10 @@ from apple_contacts_mcp.server import (
     list_contacts,
     list_containers,
     list_groups,
-    read_note,
-    read_photo,
     remove_contact_from_group,
     rename_group,
     search_contacts,
     update_contact,
-    write_note,
-    write_photo,
 )
 
 
@@ -324,7 +320,7 @@ class TestGetContactFound:
             result = get_contact("ABCD")
         assert result == {"success": True, "contact": _FAKE_CONTACT_DICT}
         mock_connector._run_cn_unified_contact.assert_called_once_with(
-            "ABCD", include_niche=False
+            "ABCD", include_niche=False, include_photo=False
         )
 
     def test_response_keys_are_minimal_on_success(self) -> None:
@@ -357,6 +353,146 @@ class TestGetContactConnectorRaises:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "boom" in result["error"]
+
+
+_JPEG_RAW = b"\xff\xd8\xff\xe0" + b"\x00" * 16
+_JPEG_B64 = base64.b64encode(_JPEG_RAW).decode("ascii")
+
+
+class TestGetContactIncludePhoto:
+    def test_photo_present_serialized_as_base64(self) -> None:
+        contact_with_photo = {
+            **_FAKE_CONTACT_DICT,
+            "photo": {"available": True, "image_data": _JPEG_RAW},
+        }
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = contact_with_photo
+            result = get_contact("ABCD", include_photo=True)
+        assert result["success"] is True
+        assert result["contact"]["photo"] == {
+            "image_data": _JPEG_B64,
+            "format": "jpeg",
+            "size_bytes": len(_JPEG_RAW),
+        }
+        mock_connector._run_cn_unified_contact.assert_called_once_with(
+            "ABCD", include_niche=False, include_photo=True
+        )
+
+    def test_photo_absent_returns_null(self) -> None:
+        contact_no_photo = {
+            **_FAKE_CONTACT_DICT,
+            "photo": {"available": False, "image_data": b""},
+        }
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = contact_no_photo
+            result = get_contact("ABCD", include_photo=True)
+        assert result["success"] is True
+        assert result["contact"]["photo"] is None
+
+    def test_default_does_not_fetch_photo(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = _FAKE_CONTACT_DICT
+            result = get_contact("ABCD")
+        assert "photo" not in result["contact"]
+
+
+class TestGetContactIncludeNote:
+    def test_note_present_returned_as_string(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = dict(
+                _FAKE_CONTACT_DICT
+            )
+            mock_connector._run_applescript_read_note.return_value = "hello"
+            result = get_contact("ABCD:ABPerson", include_note=True)
+        assert result["success"] is True
+        assert result["contact"]["note"] == "hello"
+        mock_connector._run_applescript_read_note.assert_called_once_with(
+            "ABCD:ABPerson"
+        )
+
+    def test_empty_note_returned_as_empty_string(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = dict(
+                _FAKE_CONTACT_DICT
+            )
+            mock_connector._run_applescript_read_note.return_value = ""
+            result = get_contact("ABCD", include_note=True)
+        assert result["contact"]["note"] == ""
+
+    def test_default_does_not_call_applescript(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = _FAKE_CONTACT_DICT
+            get_contact("ABCD")
+        mock_connector._run_applescript_read_note.assert_not_called()
+
+    def test_note_not_found_after_cn_fetch_returns_partial_success(
+        self,
+    ) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = dict(
+                _FAKE_CONTACT_DICT
+            )
+            mock_connector._run_applescript_read_note.side_effect = (
+                ContactsNotFoundError("Contact not found: 'X'")
+            )
+            result = get_contact("X", include_note=True)
+        assert result["success"] is False
+        assert result["error_type"] == "partial_success"
+        assert result["identifier"] == "X"
+        assert "contact" in result  # CN data still surfaced
+
+    def test_note_generic_error_returns_partial_success(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = dict(
+                _FAKE_CONTACT_DICT
+            )
+            mock_connector._run_applescript_read_note.side_effect = ContactsError(
+                "osascript boom"
+            )
+            result = get_contact("ABCD", include_note=True)
+        assert result["error_type"] == "partial_success"
+        assert "osascript boom" in result["error"]
+
+
+class TestGetContactAuditCuration:
+    def test_photo_audit_logs_size_and_format_not_bytes(self) -> None:
+        contact_with_photo = {
+            **_FAKE_CONTACT_DICT,
+            "photo": {"available": True, "image_data": _JPEG_RAW},
+        }
+        operation_logger.operations.clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = contact_with_photo
+            get_contact("ABCD", include_photo=True)
+        assert len(operation_logger.operations) == 1
+        params = operation_logger.operations[0]["parameters"]
+        assert params["photo_size_bytes"] == len(_JPEG_RAW)
+        assert params["photo_format"] == "jpeg"
+        # never the raw bytes or base64 string
+        assert "image_data" not in params
+        assert _JPEG_B64 not in str(params)
+
+    def test_note_audit_logs_length_not_content(self) -> None:
+        operation_logger.operations.clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_unified_contact.return_value = dict(
+                _FAKE_CONTACT_DICT
+            )
+            mock_connector._run_applescript_read_note.return_value = "very secret stuff"
+            get_contact("ABCD", include_note=True)
+        params = operation_logger.operations[0]["parameters"]
+        assert params["note_length"] == len("very secret stuff")
+        assert "very secret stuff" not in str(params)
 
 
 # ---------------------------------------------------------------------------
@@ -1064,6 +1200,123 @@ class TestUpdateContactErrors:
         assert "save boom" in result["error"]
 
 
+class TestUpdateContactPhoto:
+    def test_only_photo_supplied_passes_validation(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_write_photo.return_value = "ABCD"
+            result = update_contact(identifier="ABCD", photo=_JPEG_B64)
+        assert result == {"success": True, "identifier": "ABCD"}
+        mock_connector._run_cn_update_contact.assert_not_called()
+        mock_connector._run_cn_write_photo.assert_called_once()
+        kwargs = mock_connector._run_cn_write_photo.call_args.kwargs
+        assert kwargs["identifier"] == "ABCD"
+        assert kwargs["image_data"] == _JPEG_RAW
+
+    def test_empty_string_clears_photo(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_write_photo.return_value = "ABCD"
+            result = update_contact(identifier="ABCD", photo="")
+        assert result["success"] is True
+        kwargs = mock_connector._run_cn_write_photo.call_args.kwargs
+        assert kwargs["image_data"] is None
+
+    def test_invalid_base64_returns_validation_error(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            result = update_contact(identifier="ABCD", photo="not-base64!!!")
+        assert result["success"] is False
+        assert result["error_type"] == "validation_error"
+        mock_connector._run_cn_write_photo.assert_not_called()
+
+    def test_audit_logs_size_not_bytes(self) -> None:
+        operation_logger.operations.clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_write_photo.return_value = "ABCD"
+            update_contact(identifier="ABCD", photo=_JPEG_B64)
+        params = operation_logger.operations[0]["parameters"]
+        assert params["photo_size_bytes"] == len(_JPEG_RAW)
+        assert params["clearing_photo"] is False
+        assert _JPEG_B64 not in str(params)
+
+
+class TestUpdateContactNote:
+    def test_only_note_supplied_passes_validation(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_write_note.return_value = None
+            result = update_contact(identifier="ABCD", note="hi")
+        assert result == {"success": True, "identifier": "ABCD"}
+        mock_connector._run_cn_update_contact.assert_not_called()
+        mock_connector._run_applescript_write_note.assert_called_once_with(
+            "ABCD", "hi"
+        )
+
+    def test_empty_note_clears(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_write_note.return_value = None
+            result = update_contact(identifier="ABCD", note="")
+        assert result["success"] is True
+        mock_connector._run_applescript_write_note.assert_called_once_with(
+            "ABCD", ""
+        )
+
+    def test_audit_logs_length_not_content(self) -> None:
+        operation_logger.operations.clear()
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_applescript_write_note.return_value = None
+            update_contact(identifier="ABCD", note="confidential")
+        params = operation_logger.operations[0]["parameters"]
+        assert params["note_length"] == len("confidential")
+        assert "confidential" not in str(params)
+
+
+class TestUpdateContactPartialSuccess:
+    def test_cn_write_succeeds_then_photo_fails(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_update_contact.return_value = "ABCD"
+            mock_connector._run_cn_write_photo.side_effect = ContactsError(
+                "photo boom"
+            )
+            result = update_contact(
+                identifier="ABCD", given_name="Alice", photo=_JPEG_B64
+            )
+        assert result["success"] is False
+        assert result["error_type"] == "partial_success"
+        assert result["identifier"] == "ABCD"
+        assert result["writes_landed"] == ["fields"]
+        assert result["writes_failed"] == ["photo"]
+
+    def test_cn_write_succeeds_then_note_fails(self) -> None:
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_update_contact.return_value = "ABCD"
+            mock_connector._run_applescript_write_note.side_effect = (
+                ContactsError("note boom")
+            )
+            result = update_contact(
+                identifier="ABCD", given_name="Alice", note="hi"
+            )
+        assert result["error_type"] == "partial_success"
+        assert result["writes_landed"] == ["fields"]
+        assert result["writes_failed"] == ["note"]
+
+    def test_photo_first_fails_no_partial_when_no_prior_write(self) -> None:
+        """Photo-only write that fails should NOT be partial_success — no
+        prior write landed. Should be the normal not_found / unknown."""
+        with patch("apple_contacts_mcp.server.connector") as mock_connector:
+            mock_connector._run_cn_authorization_status.return_value = "authorized"
+            mock_connector._run_cn_write_photo.side_effect = (
+                ContactsNotFoundError("Contact not found: 'BAD'")
+            )
+            result = update_contact(identifier="BAD", photo=_JPEG_B64)
+        assert result["error_type"] == "not_found"
+
+
 # ---------------------------------------------------------------------------
 # delete_contact
 # ---------------------------------------------------------------------------
@@ -1289,197 +1542,6 @@ class TestDeleteContactErrors:
         assert result["success"] is False
         assert result["error_type"] == "unknown"
         assert "delete boom" in result["error"]
-
-
-# ---------------------------------------------------------------------------
-# read_note
-# ---------------------------------------------------------------------------
-
-
-class TestReadNoteValidation:
-    @pytest.mark.parametrize("identifier", ["", "   ", "\t"])
-    def test_blank_identifier_returns_validation_error(
-        self, identifier: str
-    ) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            result = read_note(identifier)
-        assert result["success"] is False
-        assert result["error_type"] == "validation_error"
-        mock_connector._run_applescript_read_note.assert_not_called()
-
-
-class TestReadNoteAuthFlow:
-    def test_auth_denied_passthrough_skips_read(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "denied"
-            result = read_note("ABCD")
-        assert result["success"] is False
-        assert result["error_type"] == "authorization_denied"
-        mock_connector._run_applescript_read_note.assert_not_called()
-
-
-class TestReadNoteHappyPath:
-    def test_returns_note_text_with_identifier_echoed(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_applescript_read_note.return_value = "hello world"
-            result = read_note("ABCD-1234:ABPerson")
-        assert result == {
-            "success": True,
-            "identifier": "ABCD-1234:ABPerson",
-            "note": "hello world",
-        }
-        mock_connector._run_applescript_read_note.assert_called_once_with(
-            "ABCD-1234:ABPerson"
-        )
-
-    def test_empty_note_round_trips(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_applescript_read_note.return_value = ""
-            result = read_note("ABCD")
-        assert result == {"success": True, "identifier": "ABCD", "note": ""}
-
-    def test_response_keys_are_minimal(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_applescript_read_note.return_value = "x"
-            result = read_note("ABCD")
-        assert set(result.keys()) == {"success", "identifier", "note"}
-
-
-class TestReadNoteErrors:
-    def test_not_found_from_connector(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_applescript_read_note.side_effect = (
-                ContactsNotFoundError("Contact not found: 'BAD'")
-            )
-            result = read_note("BAD")
-        assert result["success"] is False
-        assert result["error_type"] == "not_found"
-        assert "BAD" in result["error"]
-
-    def test_unexpected_exception_returns_unknown(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_applescript_read_note.side_effect = ContactsError(
-                "boom"
-            )
-            result = read_note("ABCD")
-        assert result["success"] is False
-        assert result["error_type"] == "unknown"
-        assert "boom" in result["error"]
-
-
-# ---------------------------------------------------------------------------
-# write_note
-# ---------------------------------------------------------------------------
-
-
-class TestWriteNoteValidation:
-    @pytest.mark.parametrize("identifier", ["", "   ", "\t"])
-    def test_blank_identifier_returns_validation_error(
-        self, identifier: str
-    ) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            result = write_note(identifier, "x")
-        assert result["success"] is False
-        assert result["error_type"] == "validation_error"
-        mock_connector._run_applescript_write_note.assert_not_called()
-
-
-class TestWriteNoteAuthFlow:
-    def test_auth_denied_passthrough_skips_write(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "denied"
-            result = write_note("ABCD", "x")
-        assert result["success"] is False
-        assert result["error_type"] == "authorization_denied"
-        mock_connector._run_applescript_write_note.assert_not_called()
-
-
-class TestWriteNoteTestModeSafety:
-    def test_test_mode_without_group_arg_blocked(self, monkeypatch: Any) -> None:
-        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
-        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
-        _get_test_group_identifiers.cache_clear()
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            with patch("subprocess.run", side_effect=FileNotFoundError):
-                result = write_note("ABCD", "x")
-        assert result["success"] is False
-        assert result["error_type"] == "safety_violation"
-        mock_connector._run_applescript_write_note.assert_not_called()
-
-    def test_test_mode_with_matching_group_proceeds(
-        self, monkeypatch: Any
-    ) -> None:
-        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
-        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
-        _get_test_group_identifiers.cache_clear()
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_applescript_write_note.return_value = None
-            with patch("subprocess.run", side_effect=FileNotFoundError):
-                result = write_note(
-                    "ABCD", "hello", group_identifier="MCP-Test"
-                )
-        assert result == {"success": True, "identifier": "ABCD"}
-
-
-class TestWriteNoteHappyPath:
-    def test_passes_identifier_and_note_to_connector(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_applescript_write_note.return_value = None
-            result = write_note("ABCD", "hello world")
-        assert result == {"success": True, "identifier": "ABCD"}
-        mock_connector._run_applescript_write_note.assert_called_once_with(
-            "ABCD", "hello world"
-        )
-
-    def test_empty_note_clears_via_connector(self) -> None:
-        """note='' is the legitimate clear value — must reach the connector."""
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_applescript_write_note.return_value = None
-            result = write_note("ABCD", "")
-        assert result == {"success": True, "identifier": "ABCD"}
-        mock_connector._run_applescript_write_note.assert_called_once_with(
-            "ABCD", ""
-        )
-
-    def test_response_keys_are_minimal(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_applescript_write_note.return_value = None
-            result = write_note("ABCD", "x")
-        assert set(result.keys()) == {"success", "identifier"}
-
-
-class TestWriteNoteErrors:
-    def test_not_found_from_connector(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_applescript_write_note.side_effect = (
-                ContactsNotFoundError("Contact not found: 'BAD'")
-            )
-            result = write_note("BAD", "x")
-        assert result["success"] is False
-        assert result["error_type"] == "not_found"
-        assert "BAD" in result["error"]
-
-    def test_unexpected_exception_returns_unknown(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_applescript_write_note.side_effect = (
-                ContactsError("boom")
-            )
-            result = write_note("ABCD", "x")
-        assert result["success"] is False
-        assert result["error_type"] == "unknown"
-        assert "boom" in result["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -2241,208 +2303,6 @@ class TestImportVcardErrors:
         assert "save failed" in result["error"]
 
 
-# ---------------------------------------------------------------------------
-# read_photo / write_photo
-# ---------------------------------------------------------------------------
-
-
-_JPEG_BYTES = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00fake-jpeg-payload"
-_JPEG_B64 = base64.b64encode(_JPEG_BYTES).decode("ascii")
-
-
-class TestReadPhotoValidation:
-    @pytest.mark.parametrize("identifier", ["", "   ", "\t"])
-    def test_blank_identifier_returns_validation_error(
-        self, identifier: str
-    ) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            result = read_photo(identifier=identifier)
-        assert result["success"] is False
-        assert result["error_type"] == "validation_error"
-        mock_connector._run_cn_authorization_status.assert_not_called()
-
-
-class TestReadPhotoAuthFlow:
-    def test_auth_denied_passthrough_skips_read(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "denied"
-            result = read_photo(identifier="ABCD")
-        assert result["success"] is False
-        assert result["error_type"] == "authorization_denied"
-        mock_connector._run_cn_read_photo.assert_not_called()
-
-
-class TestReadPhotoHappyPath:
-    def test_returns_base64_encoded_jpeg(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_cn_read_photo.return_value = {
-                "available": True,
-                "image_data": _JPEG_BYTES,
-            }
-            result = read_photo(identifier="ABCD")
-        assert result == {
-            "success": True,
-            "identifier": "ABCD",
-            "image_data": _JPEG_B64,
-            "format": "jpeg",
-            "size_bytes": len(_JPEG_BYTES),
-        }
-
-    def test_contact_without_photo_returns_null_image_data(self) -> None:
-        """Distinct from not_found: contact exists, photo unset."""
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_cn_read_photo.return_value = {
-                "available": False,
-                "image_data": b"",
-            }
-            result = read_photo(identifier="ABCD")
-        assert result == {
-            "success": True,
-            "identifier": "ABCD",
-            "image_data": None,
-            "format": None,
-            "size_bytes": 0,
-        }
-
-    def test_unknown_format_still_succeeds(self) -> None:
-        """Caller gets whatever Apple stored, even if magic bytes don't match
-        a known image format. format='unknown' on the response is normal."""
-        weird = b"\x00\x01\x02\x03some-weird-format"
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_cn_read_photo.return_value = {
-                "available": True,
-                "image_data": weird,
-            }
-            result = read_photo(identifier="ABCD")
-        assert result["success"] is True
-        assert result["format"] == "unknown"
-        assert result["size_bytes"] == len(weird)
-
-
-class TestReadPhotoNotFound:
-    def test_missing_contact_returns_not_found(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_cn_read_photo.return_value = None
-            result = read_photo(identifier="BAD")
-        assert result["success"] is False
-        assert result["error_type"] == "not_found"
-
-
-class TestReadPhotoErrors:
-    def test_unexpected_exception_returns_unknown(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_cn_read_photo.side_effect = ContactsError(
-                "boom"
-            )
-            result = read_photo(identifier="ABCD")
-        assert result["success"] is False
-        assert result["error_type"] == "unknown"
-        assert "boom" in result["error"]
-
-
-class TestWritePhotoValidation:
-    def test_empty_identifier_returns_validation_error(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            result = write_photo(identifier="", image_data=_JPEG_B64)
-        assert result["success"] is False
-        assert result["error_type"] == "validation_error"
-        mock_connector._run_cn_authorization_status.assert_not_called()
-
-    def test_invalid_base64_returns_validation_error(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            result = write_photo(identifier="ABCD", image_data="not-base64!!!")
-        assert result["success"] is False
-        assert result["error_type"] == "validation_error"
-        assert "base64" in result["error"]
-        mock_connector._run_cn_authorization_status.assert_not_called()
-
-    def test_non_string_image_data_returns_validation_error(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            # type: ignore[arg-type] — testing runtime guard
-            result = write_photo(identifier="ABCD", image_data=123)  # type: ignore[arg-type]
-        assert result["success"] is False
-        assert result["error_type"] == "validation_error"
-        mock_connector._run_cn_authorization_status.assert_not_called()
-
-
-class TestWritePhotoAuthFlow:
-    def test_auth_denied_passthrough_skips_write(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "denied"
-            result = write_photo(identifier="ABCD", image_data=_JPEG_B64)
-        assert result["success"] is False
-        assert result["error_type"] == "authorization_denied"
-        mock_connector._run_cn_write_photo.assert_not_called()
-
-
-class TestWritePhotoTestModeSafety:
-    def test_test_mode_without_group_arg_blocked(self, monkeypatch: Any) -> None:
-        monkeypatch.setenv("CONTACTS_TEST_MODE", "true")
-        monkeypatch.setenv("CONTACTS_TEST_GROUP", "MCP-Test")
-        _get_test_group_identifiers.cache_clear()
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            with patch("subprocess.run", side_effect=FileNotFoundError):
-                result = write_photo(
-                    identifier="ABCD", image_data=_JPEG_B64
-                )
-        assert result["success"] is False
-        assert result["error_type"] == "safety_violation"
-        mock_connector._run_cn_write_photo.assert_not_called()
-
-
-class TestWritePhotoHappyPath:
-    def test_writes_decoded_bytes_to_connector(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_cn_write_photo.return_value = "ABCD"
-            result = write_photo(identifier="ABCD", image_data=_JPEG_B64)
-        assert result == {"success": True, "identifier": "ABCD"}
-        kwargs = mock_connector._run_cn_write_photo.call_args.kwargs
-        assert kwargs["identifier"] == "ABCD"
-        assert kwargs["image_data"] == _JPEG_BYTES
-
-    def test_clear_passes_none_through(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_cn_write_photo.return_value = "ABCD"
-            result = write_photo(identifier="ABCD", image_data=None)
-        assert result == {"success": True, "identifier": "ABCD"}
-        kwargs = mock_connector._run_cn_write_photo.call_args.kwargs
-        assert kwargs["image_data"] is None
-
-
-class TestWritePhotoErrors:
-    def test_not_found_from_connector(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_cn_write_photo.side_effect = (
-                ContactsNotFoundError("Contact not found: 'BAD'")
-            )
-            result = write_photo(identifier="BAD", image_data=_JPEG_B64)
-        assert result["success"] is False
-        assert result["error_type"] == "not_found"
-
-    def test_save_failure_returns_unknown(self) -> None:
-        with patch("apple_contacts_mcp.server.connector") as mock_connector:
-            mock_connector._run_cn_authorization_status.return_value = "authorized"
-            mock_connector._run_cn_write_photo.side_effect = ContactsError(
-                "save boom"
-            )
-            result = write_photo(identifier="ABCD", image_data=_JPEG_B64)
-        assert result["success"] is False
-        assert result["error_type"] == "unknown"
-        assert "save boom" in result["error"]
-
-
-# ---------------------------------------------------------------------------
-# create_group
-# ---------------------------------------------------------------------------
 
 
 _NEW_GROUP_DICT = {

@@ -38,8 +38,8 @@ Captured 2026-05-12 via `make benchmark-baseline`. Authoritative source: [`tests
 | `update_contact` (one field) | 15 ms |
 | `create + delete` round-trip | 235 ms |
 | `export_vcard` (1 contact) | 43 ms |
-| `read_photo` (no photo set) | 4 ms |
-| `read_note` (AppleScript path) | 651 ms |
+| `get_contact(include_photo=True)`, no photo set | 4 ms |
+| `get_contact(include_note=True)` (AppleScript path) | 651 ms |
 
 ### Highlights
 
@@ -48,7 +48,7 @@ Captured 2026-05-12 via `make benchmark-baseline`. Authoritative source: [`tests
 - **`list_groups` is surprisingly slow (50 ms)** for 8 groups — that's the N+1 container lookup per group. Worth optimizing only if user has 50+ groups; deferred.
 - **`include_niche=True` adds only ~2 ms** (4 → 6 ms) — the four extra keys cost almost nothing per-contact. Niche is opt-in for response-size reasons, not perf.
 - **Create+delete cycle costs 235 ms** vs a single `update_contact` at 15 ms. CN's save-then-immediately-delete pays an extra `unifiedContactWithIdentifier_keysToFetch_error_` lookup; the synthetic round-trip isn't representative of real workloads. Benchmarking a single side wasn't possible without leaking state into MCP-Test.
-- **AppleScript `read_note` at 651 ms** confirms the gap analysis number (200–400 ms subprocess + handshake overhead, plus contact-id resolution inside AppleScript). The framework path would be ~5 ms if Apple ever lifted the entitlement gate.
+- **AppleScript note read (via `get_contact(include_note=True)`) at 651 ms** confirms the gap analysis number (200–400 ms subprocess + handshake overhead, plus contact-id resolution inside AppleScript). The framework path would be ~5 ms if Apple ever lifted the entitlement gate. Numbers were measured against the now-removed `read_note` tool (#98 consolidation); the AppleScript subprocess cost is identical at the new entry point since the underlying `_run_applescript_read_note` helper is unchanged.
 
 ## Core pattern: predicates beat loops
 
