@@ -26,7 +26,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastmcp>=0.2.0",
+    "fastmcp>=3.4.2",
     "pyobjc-framework-Contacts>=10.3",
 ]
 
